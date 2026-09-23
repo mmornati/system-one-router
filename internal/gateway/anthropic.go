@@ -158,7 +158,8 @@ func anthropicUsage(b []byte) usage {
 }
 
 // anthropicText returns the answer's text blocks and whether it is a final answer worth checking:
-// non-empty and not a tool-use turn.
+// non-empty, not a tool-use turn, and not truncated by the client's max_tokens (stop_reason
+// "max_tokens" means the answer is incomplete, so judging it would just measure the token limit).
 func anthropicText(b []byte) (string, bool) {
 	var v struct {
 		StopReason string `json:"stop_reason"`
@@ -167,7 +168,7 @@ func anthropicText(b []byte) (string, bool) {
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if json.Unmarshal(b, &v) != nil || v.StopReason == "tool_use" {
+	if json.Unmarshal(b, &v) != nil || v.StopReason == "tool_use" || v.StopReason == "max_tokens" {
 		return "", false
 	}
 	var sb strings.Builder

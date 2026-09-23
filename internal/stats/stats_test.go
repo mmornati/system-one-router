@@ -93,28 +93,32 @@ func TestPerModel(t *testing.T) {
 	}
 }
 
+// Reasons (like Topics/Complexity/Risk below) must reflect only real, routed requests (chat events,
+// once per id) — not route_dry (d1, reason "cheapest...") or refused (f1, "no capable model"), which
+// are not requests the router actually routed to a model.
 func TestReasons(t *testing.T) {
 	st := compute(t, time.Time{})
-	if st.Reasons["cheapest"] != 2 { // r1 chat decision + d1 route_dry
-		t.Errorf("cheapest = %d, want 2 (%v)", st.Reasons["cheapest"], st.Reasons)
+	if st.Reasons["cheapest"] != 1 { // r1 chat decision only; d1 route_dry excluded
+		t.Errorf("cheapest = %d, want 1 (%v)", st.Reasons["cheapest"], st.Reasons)
 	}
 	if st.Reasons["no model cleared the floor"] != 1 {
 		t.Errorf("no model cleared the floor = %d, want 1", st.Reasons["no model cleared the floor"])
 	}
-	if st.Reasons["no capable model"] != 1 {
-		t.Errorf("no capable model = %d, want 1 (%v)", st.Reasons["no capable model"], st.Reasons)
+	if st.Reasons["no capable model"] != 0 { // f1 refused excluded
+		t.Errorf("no capable model = %d, want 0 (%v)", st.Reasons["no capable model"], st.Reasons)
 	}
 }
 
 func TestTopicsAndHistograms(t *testing.T) {
 	st := compute(t, time.Time{})
-	if st.Topics["code-gen"] != 1 || st.Topics["security"] != 1 || st.Topics["docs"] != 1 || st.Topics["chat"] != 1 {
+	// docs (d1, route_dry) and chat (f1, refused) must not appear: neither was a routed request.
+	if st.Topics["code-gen"] != 1 || st.Topics["security"] != 1 || st.Topics["docs"] != 0 || st.Topics["chat"] != 0 {
 		t.Errorf("topics = %v", st.Topics)
 	}
-	if st.Complexity[1] != 1 || st.Complexity[3] != 1 || st.Complexity[0] != 2 {
+	if st.Complexity[1] != 1 || st.Complexity[3] != 1 || st.Complexity[0] != 0 {
 		t.Errorf("complexity = %v", st.Complexity)
 	}
-	if st.Risk[2] != 1 || st.Risk[0] != 3 {
+	if st.Risk[2] != 1 || st.Risk[0] != 1 {
 		t.Errorf("risk = %v", st.Risk)
 	}
 }

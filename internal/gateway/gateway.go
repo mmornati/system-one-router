@@ -393,17 +393,20 @@ func (s *Server) escalate(r *http.Request, dl *dialect, body map[string]any, mod
 }
 
 // assistantText returns the first choice's text and whether it is a final answer worth checking:
-// non-empty and not a tool-call turn.
+// non-empty, not a tool-call turn, and not truncated by the client's max_tokens (finish_reason
+// "length" means the answer is incomplete, so judging it would just measure the token limit).
 func assistantText(b []byte) (string, bool) {
 	var v struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content   any               `json:"content"`
 				ToolCalls []json.RawMessage `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if json.Unmarshal(b, &v) != nil || len(v.Choices) == 0 || len(v.Choices[0].Message.ToolCalls) > 0 {
+	if json.Unmarshal(b, &v) != nil || len(v.Choices) == 0 || len(v.Choices[0].Message.ToolCalls) > 0 ||
+		v.Choices[0].FinishReason == "length" {
 		return "", false
 	}
 	text, _ := content(v.Choices[0].Message.Content)
