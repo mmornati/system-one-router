@@ -62,6 +62,9 @@ type Routing struct {
 	LoadPenalty     float64       `yaml:"load_penalty"`      // cost multiplier per in-flight request
 	StickyTTL       time.Duration `yaml:"sticky_ttl"`
 	FallbackModel   string        `yaml:"fallback_model"`
+	// Explore is the probability (0 = off) of trying the next-cheaper capable model just below the quality
+	// floor on easy, harmless, non-private requests, so cmd/refit gets outcomes for models that rarely win.
+	Explore float64 `yaml:"explore"`
 	// ReasoningEffort by complexity (e.g. [low, low, medium, high]); applied only when the client sets none.
 	ReasoningEffort []string `yaml:"reasoning_effort"`
 	// Retries: on 429/5xx from upstream, try the next-best candidate this many times.

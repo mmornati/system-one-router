@@ -1,4 +1,4 @@
-.PHONY: test build gateway laya bench site
+.PHONY: test build gateway laya bench refit site
 
 test:
 	go vet ./... && go test -race ./...
@@ -15,6 +15,9 @@ laya: # local Laya sidecar on :8788 (first run downloads ~3 GB of weights)
 
 bench: # decisions only, no chat model is called
 	go run ./cmd/bench
+
+refit: # propose skill updates from data/decisions.jsonl (report only; add ARGS="-write config.new.yaml")
+	go run ./cmd/refit $(ARGS)
 
 site: # publish the newest benchmark report to site/ (deployed by .github/workflows/pages.yml)
 	@latest=$$(ls -t bench/results/bench-*.html | head -1); \

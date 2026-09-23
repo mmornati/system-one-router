@@ -212,6 +212,7 @@ call for the answers that fail.
 cmd/gateway       HTTP server
 cmd/bench         decision benchmark (Jev / Laya) → JSON + HTML report
 cmd/mcp           MCP server exposing route / delegate / feedback to agents
+cmd/refit         re-fits config.yaml skills from logged checks and feedback
 sidecar/          local Laya server (Decisions API shape)
 internal/decision Decisions API client + provider selection (jev / laya / auto)
 internal/router   request summary, privacy pre-check, scoring, answer check, sticky/load/budget state
@@ -261,6 +262,80 @@ curl -s localhost:8787/feedback -d '{"id":"<X-Router-Request-Id>","rating":"bad"
 # 204 No Content
 ```
 
+## Re-fitting skills
+
+The `skills` in `config.yaml` start as guesses. `cmd/refit` re-estimates them from the outcomes in
+`data/decisions.jsonl`. It only reads the log, and it only writes a file when you pass `-write`.
+
+**Signals.** It uses the routed `chat` events (not sticky, not pass-through) that have an outcome:
+
+| signal | label | weight (flag) |
+|---|---|---|
+| `check` event for that id + model (check-and-escalate) | `p_ok`, a soft label in 0..1 | 1 (`-w-check`) |
+| `feedback` for that id | good = 1, bad = 0; on an escalated request it rates the model that answered last | 2 (`-w-feedback`) |
+| model in `failed`, or status 429/5xx | availability, **not** quality: reported in a separate reliability table | – |
+| other 4xx | skipped | – |
+
+An answer counts toward every topic in proportion to its logged topic probabilities, so a
+`{docs: 0.8, writing: 0.2}` answer adds 0.8 of an observation to docs and 0.2 to writing.
+`N_EFF` is the sum of these weights.
+
+**Method.** The router only sends a model the prompts whose floor it clears, so a cheap model's raw success
+rate comes from easy prompts. That rate says little about harder prompts. So every outcome is scored against
+the difficulty it was routed at, `d = min_skill[complexity] + risk_bonus[risk]` (the floor, on the same 0..1
+scale as skills), using a one-parameter logistic model (Rasch/Elo-style):
+
+```
+P(success | skill s, difficulty d) = σ((s − d) / scale + logit(target))      scale 0.1, target 0.8
+```
+
+In words, a model with skill `s` is expected to succeed 80% of the time on prompts at difficulty `s`.
+Succeeding on easy prompts is weak evidence, because the model was expected to succeed. Failing easy prompts
+is strong evidence, and succeeding on hard prompts moves the skill up a lot. The seed skill from
+`config.yaml` acts as the prior: `-prior` (10) pseudo-observations at difficulty = seed with success rate =
+target, so with no data the fit is exactly the seed. The fitted skill is the posterior mode, the root of one
+monotone equation, found by bisection. `default_skill` is fitted the same way, from outcomes on the topics
+the model has no explicit skill for.
+
+A change is proposed only when `N_EFF ≥ -min-n` (20) and `|fitted − seed| ≥ -min-delta` (0.02).
+`-write <path>` copies the config with those values changed. It edits the original text in place, so
+comments, blank lines and order are kept, and new topics are appended to the model's `skills`.
+`config.yaml` itself is only overwritten if you name it.
+
+```bash
+go run ./cmd/refit                                   # report; -days 30 to use recent events only
+go run ./cmd/refit -write config.new.yaml && diff config.yaml config.new.yaml
+make refit ARGS="-min-n 40 -prior 20"
+```
+
+```
+163 chat events: 163 routed with signals, 143 with an outcome (135 checks, 20 feedback)
+
+MODEL                         TOPIC      N_EFF  SUCCESS  SEED  FITTED  DELTA
+qwen/qwen3.7-flash            chat       20.0   94%      0.75  0.71    -0.04  *
+qwen/qwen3.7-flash            code-gen   36.0   72%      0.45  0.50    +0.05  *
+qwen/qwen3.7-flash            (default)  36.0   72%      0.45  0.50    +0.05  *
+deepseek/deepseek-v4.1-flash  debugging  59.0   49%      0.62  0.47    -0.15  *
+deepseek/deepseek-v4.1-flash  docs       48.0   92%      0.70  0.67    -0.03  *
+deepseek/deepseek-v4.1-flash  writing    12.0   92%      0.65  0.65    +0.00
+
+Upstream reliability (429/5xx: availability, not counted against skill):
+MODEL                         ATTEMPTS  FAILED  FAIL_RATE
+deepseek/deepseek-v4.1-flash  100       5       5.0%
+```
+
+(Synthetic log. deepseek's 92% on simple docs prompts still lowers its skill, because a model at 0.70 is
+expected to pass 95% of prompts at a 0.55 floor.)
+
+The fit needs outcome data to mean anything. Without check-and-escalate (`check` events) or `POST /feedback`
+ratings, the log holds only routing decisions, and refit reports "not enough data".
+
+**Exploration.** A cheap model never sees prompts above its seed skill, so refit can lower its skill but
+hardly raise it. `routing.explore` (default 0, off) is the probability of sending a request to the next-cheaper
+capable model just below the floor, instead of the cheapest model that clears it. This happens only for
+complexity ≤ 1, risk 0 and non-private requests, with reason `explore: …`. A value of 0.02–0.05 is enough to
+collect data. When combined with check-and-escalate, a poor exploratory answer is escalated anyway.
+
 ## MCP server
 
 `cmd/mcp` is a thin client that exposes a running gateway to agents (Claude Code and others) over
@@ -309,7 +384,7 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 
 ## Roadmap
 
-- [ ] Re-fit model skills from logged outcomes (retries, check failures, user feedback).
+- [x] Re-fit model skills from logged outcomes (`cmd/refit`: check results, user feedback; retries reported as reliability).
 - [x] Check-and-escalate for non-streaming or background requests (a Jev yes/no on the answer).
 - [x] Laya sidecar (Python, MPS).
 - [x] Optional fixed-length padding for Laya inputs (`--pad-buckets`, off by default: measured no steady-state latency gain on torch 2.14 / macOS 26 MPS; opt in and re-measure on other hardware).

@@ -299,3 +299,36 @@ func TestStickyDoesNotCarrySecretsOffMachine(t *testing.T) {
 		t.Fatalf("secret followed the sticky model: %+v", d)
 	}
 }
+
+func TestRouteExplore(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Routing.Explore = 0.1
+	route := func(draw float64, topic string, cx, risk float64) *Decision {
+		jev := &fakeProvider{name: "jev", res: jevAnswer(topic, 0.95, cx, risk)}
+		rt := New(cfg, &decision.Selector{Mode: "jev", Providers: map[string]decision.Provider{"jev": jev}})
+		rt.rand = func() float64 { return draw }
+		return rt.Route(context.Background(), Request{LastUser: "write a csv parser", UserTurns: 1}, "id")
+	}
+	// Simple code-gen: deepseek wins; qwen is cheaper but below the floor, so a low draw explores it.
+	if d := route(0.05, "code-gen", 1, 0.3); d.Model != "qwen/qwen3.7-flash" || !strings.HasPrefix(d.Reason, "explore: ") {
+		t.Fatalf("explore: %s %q", d.Model, d.Reason)
+	}
+	if d := route(0.5, "code-gen", 1, 0.3); d.Model != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("draw above rate: %s", d.Model)
+	}
+	// Too complex or risky: never explore.
+	if d := route(0, "code-gen", 2, 0.3); strings.HasPrefix(d.Reason, "explore") {
+		t.Fatalf("complex: %q", d.Reason)
+	}
+	if d := route(0, "code-gen", 1, 1.5); strings.HasPrefix(d.Reason, "explore") {
+		t.Fatalf("risky: %q", d.Reason)
+	}
+	// Already the cheapest capable model: nothing cheaper to explore.
+	if d := route(0, "chat", 0, 0); d.Model != "qwen/qwen3.7-flash" || strings.HasPrefix(d.Reason, "explore") {
+		t.Fatalf("cheapest: %s %q", d.Model, d.Reason)
+	}
+	cfg.Routing.Explore = 0
+	if d := route(0, "code-gen", 1, 0.3); d.Model != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("off: %s", d.Model)
+	}
+}
