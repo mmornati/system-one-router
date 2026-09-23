@@ -240,6 +240,9 @@ func TestCheckPrivacy(t *testing.T) {
 		t.Fatalf("private request checked remotely: err=%v calls=%d", err, jev.calls)
 	}
 	d.Signals.Private = false
+	if _, _, _, _, err := rt.Check(context.Background(), Request{LastUser: "x"}, "your key: AKIAABCDEFGHIJKLMNOP", d); !errors.Is(err, ErrCheckSkipped) || jev.calls != 0 {
+		t.Fatalf("answer quoting a secret checked remotely: err=%v calls=%d", err, jev.calls)
+	}
 	if p, _, _, prov, err := rt.Check(context.Background(), Request{LastUser: "x"}, "y", d); err != nil || p != 0.3 || prov != "jev" {
 		t.Fatalf("public check: p=%v prov=%q err=%v", p, prov, err)
 	}

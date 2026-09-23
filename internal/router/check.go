@@ -18,9 +18,10 @@ var checkQuestion = decision.Noul("Does the answer fully and correctly address t
 	"The answer is wrong, incomplete, evasive or truncated, refuses without reason, or ignores instructions or constraints in the request.")
 
 // Check asks the decision model whether answer fully addresses req, returning P(yes). d must be the
-// routing decision for req; it decides whether the request is private.
+// routing decision for req; it and the answer itself (which may quote secrets from earlier messages or
+// tool results the pre-check never saw) decide whether the request is private.
 func (r *Router) Check(ctx context.Context, req Request, answer string, d *Decision) (pOK, cost float64, ms int64, provider string, err error) {
-	private := req.LooksPrivate() || (d.Signals != nil && d.Signals.Private)
+	private := req.LooksPrivate() || looksPrivate(answer) || (d.Signals != nil && d.Signals.Private)
 	p, err := r.sel.Pick(private)
 	if err != nil {
 		if private && r.cfg.Decision.Private == "local_only" {

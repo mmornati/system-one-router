@@ -290,7 +290,8 @@ func (s *Server) logChat(id string, d *router.Decision, a *answer, failed []stri
 // unless the escalated call succeeded.
 func (s *Server) checkAndEscalate(r *http.Request, body map[string]any, req router.Request, d *router.Decision, id string, a *answer, failed []string) *answer {
 	c := s.Cfg.Routing.Check
-	if !c.Enabled || d == nil || d.Signals == nil || d.Signals.Complexity < c.MinComplexity || a.status != http.StatusOK {
+	if !c.Enabled || d == nil || d.Signals == nil || d.Signals.Complexity < c.MinComplexity || a.status != http.StatusOK ||
+		r.Context().Err() != nil { // client gone: nobody to give a better answer to
 		return a
 	}
 	text, ok := assistantText(a.body)

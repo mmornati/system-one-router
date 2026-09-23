@@ -142,7 +142,8 @@ It is skipped for streaming requests, sticky follow-ups, fallback routes, tool-c
 non-200 responses, and when the model used is already the strongest capable one. Streaming is excluded
 because the client already has the answer by the time it can be judged. The check uses the same
 provider choice as routing, so a private request goes to the local provider when routing would use it,
-and is not checked at all under `private: local_only` without one.
+and is not checked at all under `private: local_only` without one. An answer that trips the secret
+pre-check counts as private too. Under `local_only`, a private request only escalates to a local model.
 
 Cost: one extra decision call per checked answer (about $0.00004 with Jev, ~300 ms), plus a second model
 call for the answers that fail.
@@ -155,7 +156,7 @@ cmd/bench         decision benchmark (Jev / Laya) → JSON + HTML report
 cmd/mcp           MCP server exposing route / delegate / feedback to agents
 sidecar/          local Laya server (Decisions API shape)
 internal/decision Decisions API client + provider selection (jev / laya / auto)
-internal/router   request summary, privacy pre-check, scoring, sticky/load/budget state
+internal/router   request summary, privacy pre-check, scoring, answer check, sticky/load/budget state
 internal/gateway  OpenAI-compatible handlers, retry, streaming + cost metering, dashboard/stats
 internal/upstream upstream client + live price refresh
 internal/store    JSONL event log
