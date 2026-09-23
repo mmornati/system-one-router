@@ -249,7 +249,8 @@ func processLine(line []byte, since time.Time, st *Stats, models map[string]*mod
 			}
 			if d.Decision != nil {
 				st.Totals.Routed++
-				recordDecision(d.Decision, st, decisionLatencies)
+				recordDecisionCost(d.Decision, st, decisionLatencies)
+				recordDecisionSignals(d.Decision, st)
 			} else {
 				st.Totals.Passthrough++
 			}
@@ -304,14 +305,19 @@ func processLine(line []byte, since time.Time, st *Stats, models map[string]*mod
 		st.Totals.DryRoutes++
 		var d router.Decision
 		if err := json.Unmarshal(ev.Data, &d); err == nil {
-			recordDecision(&d, st, decisionLatencies)
+			// A dry run makes a real decision-model call (counted in cost/latency), but it is not a
+			// real request: it must not appear in the reason/topic/complexity/risk histograms, which
+			// are meant to describe real (routed) traffic.
+			recordDecisionCost(&d, st, decisionLatencies)
 		}
 
 	case "refused":
 		st.Totals.Refused++
 		var d router.Decision
 		if err := json.Unmarshal(ev.Data, &d); err == nil {
-			recordDecision(&d, st, decisionLatencies)
+			// Same reasoning: a refused request was never routed to a model, so it is excluded from
+			// the histograms (whose denominator, on the dashboard, is Totals.Routed).
+			recordDecisionCost(&d, st, decisionLatencies)
 		}
 
 	case "shadow":
@@ -375,14 +381,22 @@ func processLine(line []byte, since time.Time, st *Stats, models map[string]*mod
 	}
 }
 
-// recordDecision folds a routing Decision (from chat, route_dry, or refused) into the reason,
-// topic, complexity, risk and decision-latency/cost aggregates.
-func recordDecision(d *router.Decision, st *Stats, decisionLatencies map[string][]int64) {
+// recordDecisionCost folds a routing Decision's cost and decision-latency into the aggregates. It
+// runs for every decision call (chat, route_dry, refused), since all of them bill and take time.
+func recordDecisionCost(d *router.Decision, st *Stats, decisionLatencies map[string][]int64) {
 	st.Totals.DecisionCostUSD += d.DecisionCostUSD
-	st.Reasons[reasonCategory(d.Reason)]++
 	if d.Provider != "" {
 		decisionLatencies[d.Provider] = append(decisionLatencies[d.Provider], d.DecisionMs)
 	}
+}
+
+// recordDecisionSignals folds a routing Decision into the reason, topic, complexity and risk
+// histograms. It must only run for real, routed requests (a "chat" event's Decision, once per id,
+// matching how Totals.Requests/Routed are counted) — never for route_dry or refused, which are not
+// requests the router actually routed and would otherwise skew the histograms and the dashboard's
+// "no model cleared the floor" share (computed over Totals.Routed).
+func recordDecisionSignals(d *router.Decision, st *Stats) {
+	st.Reasons[reasonCategory(d.Reason)]++
 	if d.Signals != nil {
 		if d.Signals.Primary != "" {
 			st.Topics[d.Signals.Primary]++
