@@ -90,7 +90,7 @@ func newServerWithLog(t *testing.T) (*httptest.Server, *[]string, *router.Router
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { log.Close() })
-	gw := httptest.NewServer((&Server{Cfg: cfg, Router: rt, Upstream: func(string) *upstream.Client { return client }, Log: log}).Handler())
+	gw := httptest.NewServer((&Server{Cfg: cfg, Router: rt, Upstream: func(string) *upstream.Client { return client }, Log: log, LogPath: logPath}).Handler())
 	t.Cleanup(gw.Close)
 	return gw, seen, rt, logPath
 }
@@ -285,5 +285,57 @@ func TestFeedback(t *testing.T) {
 	}
 	if fb == nil || fb["id"] != "abc123" || fb["rating"] != "good" || fb["comment"] != "nice" {
 		t.Fatalf("feedback not logged: %+v", fb)
+	}
+}
+
+func TestStatsAndDashboard(t *testing.T) {
+	gw, _, _, logPath := newServerWithLog(t)
+
+	post(t, gw.URL+"/v1/chat/completions", `{"model":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	waitForLog(t, logPath, 1)
+
+	res, err := http.Get(gw.URL + "/stats?days=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("/stats: status %d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("/stats content-type: %s", ct)
+	}
+	var st struct {
+		Totals struct {
+			Requests int `json:"requests"`
+		} `json:"totals"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Totals.Requests != 1 {
+		t.Fatalf("/stats totals.requests = %d, want 1", st.Totals.Requests)
+	}
+
+	res, err = http.Get(gw.URL + "/stats?days=-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("/stats?days=-1: status %d", res.StatusCode)
+	}
+
+	res, err = http.Get(gw.URL + "/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("/dashboard: status %d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("/dashboard content-type: %s", ct)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "<html") {
+		t.Fatalf("/dashboard body doesn't look like HTML: %s", body[:min(200, len(body))])
 	}
 }
