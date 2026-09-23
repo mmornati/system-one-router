@@ -70,7 +70,7 @@ Reading it:
 - **Jev is usable as-is.**
 - **Laya out of the box is not.** It is rarely confident, so the router plays safe and bumps most requests to Sonnet/Opus. The routes end up more expensive than Jev's, not cheaper.
 - **When Laya English is confident, it is right**, which is what makes it a candidate for fine-tuning on Jev-labelled traffic (shadow mode).
-- **Latency:** Laya on MPS takes about 30–70 ms per call for a repeated input shape, but 200–350 ms when the sequence length changes. The CPU is slower still (517 ms p50).
+- **Latency:** Laya on MPS takes about 30–70 ms per call for a repeated input shape, but pays a one-off kernel-compile tax the first time a call uses a sequence length MPS hasn't seen yet (historically up to 200–350 ms; on the currently installed stack — torch 2.14, macOS 26, Apple M4 — that tax measured much smaller, a few tens of ms). `sidecar/laya_server.py --pad-buckets 64,128,256,512,1024` (on by default) rounds every call's token length up to a fixed bucket so MPS only ever compiles a handful of shapes, which it warms at `--preload` time; pass `--pad-buckets none` to disable. Padding is output-preserving: the attention mask zeroes out padded positions everywhere they reach the model (encoder attention and the decision head's `src_key_padding_mask`), and on 12 varied prompts through the English checkpoint the padded vs. unpadded probabilities were bit-identical (max diff 0.0). Measured on 40 varied-length prompts from `bench/cases.json` (English checkpoint, MPS): padded p50/p95 163/676 ms vs. unpadded p50/p95 102/672 ms — on this stack the recompile tax is small enough that padding's own overhead (attention over the padded tokens) roughly cancels its benefit for average latency, but it does eliminate shape-change spikes: a per-length probe (new length vs. immediate repeat) showed identical latency once buckets were warmed, versus a spike up to ~4x on the first occurrence of an unbucketed shape. The CPU is slower still (517 ms p50) and shows no such shape-change penalty, so padding is MPS-only in effect (it's a no-op cost-wise on CPU, since the encoder there is not shape-sensitive the same way).
 
 ## Laya sidecar
 
@@ -80,8 +80,10 @@ Models: `laya` (English, 512 tokens), `laya-multilingual` (1024 tokens, 100+ lan
 
 ```bash
 uv venv --python 3.12 sidecar/.venv && uv pip install --python sidecar/.venv/bin/python laya==0.3.6
-sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps]
+sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps] [--pad-buckets 64,128,256,512,1024|none]
 ```
+
+`--pad-buckets` (default `64,128,256,512,1024`) pads every call's tokenized sequence up to the smallest bucket that fits, so repeated calls reuse the same MPS shape instead of triggering a recompile; `--pad-buckets none` turns it off. It's implemented as a small wrapper around `laya.agent.collate_items` (the function `Agent.system_one` uses to build the batch) that extends `input_ids`/`attention_mask` to the bucket length with zero-attention padding, so it doesn't require patching the `laya` package itself. With `--preload`, each loaded checkpoint also runs one warmup call per bucket at or under its `max_len`, so the first real request at any bucket size is already fast. See "Latency" above for measurements.
 
 ## Decision providers
 
@@ -196,7 +198,8 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 - [ ] Re-fit model skills from logged outcomes (retries, check failures, user feedback).
 - [ ] Check-and-escalate for non-streaming or background requests (a Jev yes/no on the answer).
 - [x] Laya sidecar (Python, MPS).
-- [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first); pad inputs to fixed lengths to avoid MPS recompiles.
+- [x] Pad Laya inputs to fixed lengths to avoid MPS recompiles.
+- [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first).
 - [ ] Anthropic Messages API endpoint, so Claude Code-style clients can use the gateway.
 - [x] MCP server exposing `route` / `delegate` to agents.
 - [ ] Dashboard over `decisions.jsonl` (cost per model, agreement, escalations).
