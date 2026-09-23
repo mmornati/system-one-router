@@ -1,5 +1,5 @@
-// Package store appends routing events to a JSONL file: the raw material for the dashboard,
-// for re-fitting model skills, and for fine-tuning Laya later.
+// Package store appends routing events to a JSONL file: the raw material for the dashboard
+// and for re-fitting model skills.
 package store
 
 import (

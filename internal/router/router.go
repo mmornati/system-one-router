@@ -38,7 +38,7 @@ type Decision struct {
 	Signals         *Signals `json:"signals,omitempty"`
 	// Answers are the raw decision-model answers (probabilities and per-question confidence).
 	Answers map[string]decision.Answer `json:"answers,omitempty"`
-	// State is the state map sent to the decision model, kept for Laya fine-tuning. Omitted for private requests.
+	// State is the state map sent to the decision model, kept as training data for re-fitting skills. Omitted for private requests.
 	State      map[string]string `json:"state,omitempty"`
 	Needs      Needs             `json:"needs"`
 	Required   float64           `json:"required_skill,omitempty"`
