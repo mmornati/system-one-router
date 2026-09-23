@@ -146,6 +146,8 @@ type dialect struct {
 	usage  func([]byte) usage                     // usage from a response body or one SSE data payload
 	text   func([]byte) (string, bool)            // answer text, and whether it is worth checking
 	error  func(http.ResponseWriter, int, string) // error body in this API's shape
+	// errBody, if set, rewrites a non-SSE upstream error body into this API's shape.
+	errBody func(status int, body []byte) []byte
 }
 
 var openAIDialect = &dialect{path: "/chat/completions", openAI: true, usage: extractUsage, text: assistantText, error: httpError}
@@ -236,9 +238,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, dl *dialect, body
 // already has the answer by the time it is complete).
 func (s *Server) forward(w http.ResponseWriter, res *http.Response, dl *dialect, model string, d *router.Decision, id string, failed []string, stream bool, latency time.Duration) {
 	defer res.Body.Close()
+	body := io.Reader(res.Body)
+	if res.StatusCode >= 400 && !isSSE(res) && dl.errBody != nil { // a stream refused before it started
+		b, _ := io.ReadAll(res.Body)
+		body = bytes.NewReader(dl.errBody(res.StatusCode, b))
+		res.Header.Set("Content-Type", "application/json")
+	}
 	setHeaders(w, res.Header, model, d, failed)
 	w.WriteHeader(res.StatusCode)
-	u := copyAndMeter(w, res.Body, isSSE(res), dl.usage)
+	u := copyAndMeter(w, body, isSSE(res), dl.usage)
 	s.logChat(id, d, &answer{api: dl.name, model: model, status: res.StatusCode, usage: u, latency: latency}, failed, stream, "")
 	if res.StatusCode >= 400 {
 		slog.Warn("upstream error", "model", model, "status", res.StatusCode)
@@ -263,6 +271,10 @@ func isSSE(res *http.Response) bool {
 func readAnswer(res *http.Response, dl *dialect, model string, start time.Time) *answer {
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
+	if res.StatusCode >= 400 && dl.errBody != nil {
+		b = dl.errBody(res.StatusCode, b)
+		res.Header.Set("Content-Type", "application/json")
+	}
 	return &answer{api: dl.name, model: model, status: res.StatusCode, header: res.Header, body: b, usage: dl.usage(b), latency: time.Since(start)}
 }
 
@@ -406,22 +418,12 @@ type usage struct {
 	ReasoningTokens  int
 }
 
-// merge overlays the non-zero fields of n on u: streamed usage can be split over several events
-// (Anthropic: input tokens in message_start, output tokens and cost in message_delta).
+// merge combines streamed usage split over several events (Anthropic: input tokens in message_start,
+// output tokens and cost in message_delta). Every counter is cumulative, and an event may report only
+// some of its parts (a message_delta with input_tokens but no cache reads), so the max wins.
 func (u usage) merge(n usage) usage {
-	if n.CostUSD != 0 {
-		u.CostUSD = n.CostUSD
-	}
-	if n.PromptTokens != 0 {
-		u.PromptTokens = n.PromptTokens
-	}
-	if n.CompletionTokens != 0 {
-		u.CompletionTokens = n.CompletionTokens
-	}
-	if n.ReasoningTokens != 0 {
-		u.ReasoningTokens = n.ReasoningTokens
-	}
-	return u
+	return usage{CostUSD: max(u.CostUSD, n.CostUSD), PromptTokens: max(u.PromptTokens, n.PromptTokens),
+		CompletionTokens: max(u.CompletionTokens, n.CompletionTokens), ReasoningTokens: max(u.ReasoningTokens, n.ReasoningTokens)}
 }
 
 // copyAndMeter streams the upstream body to the client and extracts usage on the way.
@@ -495,12 +497,15 @@ func readChat(r *http.Request) (map[string]any, router.Request, error) {
 		return nil, router.Request{}, err
 	}
 	var req router.Request
+	var rest strings.Builder // for the privacy pre-check: tool results, earlier turns
 	msgs, _ := body["messages"].([]any)
 	for _, raw := range msgs {
 		m, _ := raw.(map[string]any)
 		role, _ := m["role"].(string)
 		text, img := content(m["content"])
 		req.Chars += len(text)
+		rest.WriteString(text)
+		rest.WriteByte('\n')
 		req.Vision = req.Vision || img
 		switch role {
 		case "system", "developer":
@@ -515,6 +520,7 @@ func readChat(r *http.Request) (map[string]any, router.Request, error) {
 			req.LastUser = text
 		}
 	}
+	req.Rest = rest.String()
 	if tools, _ := body["tools"].([]any); len(tools) > 0 {
 		req.Tools = true
 		tb, _ := json.Marshal(tools)

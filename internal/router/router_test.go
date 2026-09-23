@@ -282,3 +282,20 @@ func TestAnthropicAPINeedsExcludeLocalRuntimes(t *testing.T) {
 		t.Fatalf("anthropic-capable local model not used: %+v", d)
 	}
 }
+
+func TestStickyDoesNotCarrySecretsOffMachine(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Decision.Private = "local_only"
+	rt := New(cfg, &decision.Selector{Mode: "jev", PrivatePolicy: "local_only", Providers: map[string]decision.Provider{
+		"jev": &fakeProvider{name: "jev", res: jevAnswer("chat", 0.95, 0, 0)}}})
+	ctx := context.Background()
+	d := rt.Route(ctx, Request{FirstUser: "hi", LastUser: "hi", UserTurns: 1}, "a")
+	if d.Refused || d.Model == "" {
+		t.Fatalf("first turn: %+v", d)
+	}
+	// Later turn: a tool result carries a secret. The remote sticky model must not get it.
+	d = rt.Route(ctx, Request{FirstUser: "hi", LastUser: "go on", UserTurns: 3, Rest: "AWS_KEY=AKIAABCDEFGHIJKLMNOP"}, "b")
+	if d.Sticky || !d.Refused {
+		t.Fatalf("secret followed the sticky model: %+v", d)
+	}
+}

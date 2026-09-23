@@ -74,6 +74,9 @@ completions; logged `chat` events carry `data.api: "anthropic"`.
   come in user-role messages: they count as turns (so an agent's tool loop stays on its sticky model and is not
   re-decided on every step) and in the input size, but not as the user's words. Image blocks (also inside tool
   results) require a vision model.
+- **Privacy:** the secret pre-check scans everything the model would read, tool results included (a `Read` of a
+  `.env` file). Under `private: local_only`, a secret that appears mid-conversation also breaks the sticky model if
+  it is remote: the request is re-routed to a local model or refused (same for the chat endpoint).
 - **Local runtimes:** a model with its own `base_url` is skipped for `/v1/messages` (candidate reason
   `no Anthropic API`) unless it has `anthropic: true`, meaning the runtime serves `/messages` itself. There is no
   Anthropic-to-OpenAI translation, so a private request under `private: local_only` with no such local model gets 422.
@@ -86,7 +89,9 @@ completions; logged `chat` events carry `data.api: "anthropic"`.
 - **Headers:** client credentials (`Authorization`, `x-api-key`) are never forwarded, on either endpoint. Only
   `Accept`, `HTTP-Referer`, `X-Title`, `anthropic-version` and `anthropic-beta` are.
 - **Metering:** prompt tokens are `input_tokens` plus cache reads and writes. For streams, usage is read from the
-  `message_start` and `message_delta` events.
+  `message_start` and `message_delta` events (counters are cumulative: the largest value wins).
+- **Errors** are in Anthropic's shape, `{"type":"error","error":{"type":…,"message":…}}`, including upstream errors
+  that were not (OpenRouter's `{"error":{…}}`, an empty 429).
 
 ## Dashboard
 

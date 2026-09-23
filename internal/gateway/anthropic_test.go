@@ -306,3 +306,51 @@ func TestAnthropicText(t *testing.T) {
 		t.Fatal("tool_use turn must not be checked")
 	}
 }
+
+func TestReadMessagesStickyKeyAndToolResultPrivacy(t *testing.T) {
+	sys := `"system":[{"type":"text","text":"You are Claude Code."}]`
+	first := `{"role":"user","content":[{"type":"text","text":"<system-reminder>ctx</system-reminder>"},{"type":"text","text":"fix the bug"}]}`
+	turn1 := `{` + sys + `,"messages":[` + first + `]}`
+	turn3 := `{` + sys + `,"messages":[` + first + `,
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":".env"}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"AWS_KEY=AKIAABCDEFGHIJKLMNOP"},{"type":"text","text":"<system-reminder>todo</system-reminder>","cache_control":{"type":"ephemeral"}}]}]}`
+	_, r1, _ := readMessages(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(turn1)))
+	_, r3, _ := readMessages(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(turn3)))
+	if r1.StickyKey() != r3.StickyKey() || r3.UserTurns != 2 {
+		t.Fatalf("sticky key changed as the conversation grew: %+v / %+v", r1, r3)
+	}
+	if r1.LooksPrivate() || !r3.LooksPrivate() || strings.Contains(r3.LastUser+r3.FirstUser, "AKIA") {
+		t.Fatalf("tool-result secret: r1 %v r3 %v", r1.LooksPrivate(), r3.LooksPrivate())
+	}
+}
+
+func TestAnthropicStreamUsageMerge(t *testing.T) {
+	// message_delta may repeat input_tokens without the cache counts: message_start's total must stand.
+	u := usage{}.merge(anthropicUsage([]byte(`{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":1}}}`)))
+	u = u.merge(anthropicUsage([]byte(`{"type":"message_delta","usage":{"input_tokens":10,"output_tokens":20,"cost":0.002}}`)))
+	if u != (usage{CostUSD: 0.002, PromptTokens: 100, CompletionTokens: 20}) {
+		t.Fatalf("merged usage: %+v", u)
+	}
+}
+
+func TestMessagesUpstreamErrorAnthropicShape(t *testing.T) {
+	e := newAnthropicServer(t, "openai/gpt-5.6-luna", nil) // pass-through: one attempt, 429 with no body
+	for _, stream := range []string{"false", "true"} {
+		res := postH(t, e.gw.URL+"/v1/messages", `{"model":"openai/gpt-5.6-luna","stream":`+stream+`,"messages":[{"role":"user","content":"x"}]}`, nil)
+		var body struct {
+			Type  string `json:"type"`
+			Error struct{ Type, Message string }
+		}
+		json.NewDecoder(res.Body).Decode(&body)
+		if res.StatusCode != 429 || body.Type != "error" || body.Error.Type != "rate_limit_error" || body.Error.Message == "" ||
+			res.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("stream=%s: %d %v %+v", stream, res.StatusCode, res.Header, body)
+		}
+	}
+	if b := anthropicErrorBody(400, []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"m"}}`)); !strings.Contains(string(b), `"message":"m"`) {
+		t.Fatalf("anthropic-shaped body rewritten: %s", b)
+	}
+	if b := anthropicErrorBody(502, []byte(`{"error":{"message":"provider down","code":502}}`)); !strings.Contains(string(b), `"api_error"`) || !strings.Contains(string(b), "provider down") {
+		t.Fatalf("openrouter body: %s", b)
+	}
+}

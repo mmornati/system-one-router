@@ -98,13 +98,15 @@ func (r *Router) Route(ctx context.Context, req Request, id string) *Decision {
 	env := Env{InFlight: r.Tracker.InFlight, SpentUSD: r.Tracker.Spent}
 	key := req.StickyKey()
 
+	privateHint := req.LooksPrivate()
 	if req.UserTurns > 1 {
-		if m, ok := r.Tracker.Sticky(key); ok && r.serves(m, needs) {
+		// A secret that shows up mid-conversation (e.g. in a tool result) must not follow the sticky
+		// model off the machine.
+		if m, ok := r.Tracker.Sticky(key); ok && r.serves(m, needs) && !(privateHint && r.cfg.Decision.Private == "local_only" && !r.isLocal(m)) {
 			return &Decision{ID: id, Model: m, Reason: "sticky: continuing conversation", Sticky: true, Needs: needs}
 		}
 	}
 
-	privateHint := req.LooksPrivate()
 	p, err := r.sel.Pick(privateHint)
 	if err != nil {
 		if privateHint && r.cfg.Decision.Private == "local_only" {
@@ -174,6 +176,11 @@ func (r *Router) fallback(id string, needs Needs, err error) *Decision {
 		}
 	}
 	return d
+}
+
+func (r *Router) isLocal(model string) bool {
+	m := r.cfg.Model(model)
+	return m != nil && m.Local
 }
 
 // serves reports whether model can take a request with these needs' API format (models not in the

@@ -15,7 +15,8 @@ import (
 // /messages endpoint (OpenRouter serves it for every model), so only models that speak it qualify:
 // see config.Model.ServesAnthropic. No Anthropic<->OpenAI translation happens here.
 
-var anthropicDialect = &dialect{name: "anthropic", path: "/messages", usage: anthropicUsage, text: anthropicText, error: anthropicError}
+var anthropicDialect = &dialect{name: "anthropic", path: "/messages", usage: anthropicUsage, text: anthropicText, error: anthropicError,
+	errBody: anthropicErrorBody}
 
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	body, req, err := readMessages(r)
@@ -51,7 +52,8 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 // readMessages parses an Anthropic Messages request, keeping unknown fields intact, and summarises it
 // for routing. Tool results arrive in user-role messages: every user message counts as a turn (so a
 // tool loop stays on its sticky model), but only the text blocks of user messages that have some
-// are the user's words (FirstUser/LastUser). Chars counts everything the model reads.
+// are the user's words (FirstUser/LastUser). Chars counts everything the model reads, and Rest holds it
+// for the privacy pre-check (tool results are where secrets such as a read .env file show up).
 func readMessages(r *http.Request) (map[string]any, router.Request, error) {
 	var body map[string]any
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&body); err != nil {
@@ -61,10 +63,12 @@ func readMessages(r *http.Request) (map[string]any, router.Request, error) {
 	all, sys, _ := blocks(body["system"])
 	req.System, req.Chars = strings.TrimSpace(sys), len(all)
 	msgs, _ := body["messages"].([]any)
+	var rest strings.Builder
 	for _, raw := range msgs {
 		m, _ := raw.(map[string]any)
 		all, text, img := blocks(m["content"])
 		req.Chars += len(all)
+		rest.WriteString(all + "\n")
 		req.Vision = req.Vision || img
 		if m["role"] != "user" {
 			continue
@@ -78,6 +82,7 @@ func readMessages(r *http.Request) (map[string]any, router.Request, error) {
 		}
 		req.LastUser = text
 	}
+	req.Rest = rest.String()
 	if tools, _ := body["tools"].([]any); len(tools) > 0 {
 		req.Tools = true
 		tb, _ := json.Marshal(tools)
@@ -105,13 +110,14 @@ func blocks(c any) (all, text string, img bool) {
 				img = true
 			case "thinking":
 				s, _ := b["thinking"].(string)
-				a.WriteString(s)
+				a.WriteString(s + "\n")
 			case "tool_use":
 				in, _ := json.Marshal(b["input"])
 				a.Write(in)
+				a.WriteByte('\n')
 			case "tool_result":
 				s, _, i := blocks(b["content"])
-				a.WriteString(s)
+				a.WriteString(s + "\n")
 				img = img || i
 			}
 		}
@@ -177,11 +183,43 @@ func anthropicText(b []byte) (string, bool) {
 }
 
 func anthropicError(w http.ResponseWriter, code int, msg string) {
-	typ := "api_error"
-	if code < 500 {
+	writeJSON(w, code, anthropicErrorJSON(code, msg))
+}
+
+func anthropicErrorJSON(code int, msg string) map[string]any {
+	typ := map[int]string{401: "authentication_error", 403: "permission_error", 404: "not_found_error",
+		413: "request_too_large", 429: "rate_limit_error", 529: "overloaded_error"}[code]
+	switch {
+	case typ != "":
+	case code >= 500:
+		typ = "api_error"
+	default:
 		typ = "invalid_request_error"
 	}
-	writeJSON(w, code, map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}})
+	return map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
+}
+
+// anthropicErrorBody rewrites an upstream error body that is not in Anthropic's shape (OpenRouter's
+// {"error":{"message"}}, or an empty 429) so Anthropic clients can read it.
+func anthropicErrorBody(code int, b []byte) []byte {
+	var v struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(b, &v) == nil && v.Type == "error" {
+		return b
+	}
+	msg := v.Error.Message
+	if msg == "" {
+		msg = strings.TrimSpace(string(b))
+	}
+	if msg == "" {
+		msg = http.StatusText(code)
+	}
+	out, _ := json.Marshal(anthropicErrorJSON(code, "upstream: "+msg))
+	return out
 }
 
 // anthropicModels lists the models in the Anthropic GET /v1/models shape (asked for by clients that

@@ -18,6 +18,9 @@ type Request struct {
 	Vision    bool
 	// AnthropicAPI is set for Anthropic Messages API requests: only models that serve that API qualify.
 	AnthropicAPI bool
+	// Rest is every other text the model reads (earlier turns, tool calls and results): scanned by the
+	// privacy pre-check, never sent to the decision model.
+	Rest string
 }
 
 // StickyKey identifies a conversation: same system prompt + same opening message.
@@ -85,7 +88,7 @@ var secretPatterns = []*regexp.Regexp{
 
 // LooksPrivate is a cheap local pre-check, run before any data leaves the machine.
 func (r Request) LooksPrivate() bool {
-	return looksPrivate(r.System + "\n" + r.FirstUser + "\n" + r.LastUser)
+	return looksPrivate(r.System + "\n" + r.FirstUser + "\n" + r.LastUser + "\n" + r.Rest)
 }
 
 func looksPrivate(all string) bool {
