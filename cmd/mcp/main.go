@@ -15,7 +15,7 @@ import (
 
 func main() {
 	gatewayURL := flag.String("gateway", envOr("ROUTER_URL", "http://127.0.0.1:8787"), "base URL of the running gateway")
-	httpAddr := flag.String("http", "", "serve streamable HTTP on this address instead of stdio (e.g. :8790)")
+	httpAddr := flag.String("http", "", "serve streamable HTTP on this address instead of stdio (e.g. 127.0.0.1:8790; no auth, keep it local)")
 	flag.Parse()
 
 	c := &client{baseURL: *gatewayURL, hc: &http.Client{Timeout: 5 * time.Minute}}

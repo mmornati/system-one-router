@@ -163,7 +163,7 @@ gateway first.
 
 ```bash
 go run ./cmd/mcp                 # stdio (default), for launching from an agent
-go run ./cmd/mcp -http :8790      # streamable HTTP instead
+go run ./cmd/mcp -http 127.0.0.1:8790   # streamable HTTP instead (no auth: keep it on localhost)
 ```
 
 Register it with Claude Code:
