@@ -1,0 +1,104 @@
+# Gateway configuration. Point any OpenAI-compatible client at http://127.0.0.1:8787/v1 with model "auto".
+listen: 127.0.0.1:8787
+log_path: data/decisions.jsonl
+
+upstream:
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_KEY
+  refresh_prices: true # overwrite prices below with live OpenRouter prices at startup
+
+decision:
+  provider: jev          # jev | laya | auto (auto: local provider for private requests, remote otherwise)
+  shadow: ""             # e.g. "laya": also ask it in the background and log agreement
+  private: prefer_local  # prefer_local | local_only | ignore
+  confidence_threshold: 0.8
+  risk_offset: -0.3      # bench: Jev scores risk ~+1 high on harmless tasks
+  providers:
+    jev:
+      url: https://openrouter.ai/api/alpha/decisions
+      model: typesafe/jev-1.13
+      api_key_env: OPENROUTER_KEY
+      max_state_chars: 6000
+      timeout: 3s
+    # laya:                 # local sidecar exposing the same Decisions API shape (not built yet)
+    #   url: http://127.0.0.1:8788/decisions   # sidecar/laya_server.py
+    #   model: convaiinnovations/laya
+    #   local: true
+    #   max_state_chars: 1500   # English checkpoint: 512 tokens
+    #   timeout: 1s
+
+routing:
+  min_skill: [0.40, 0.55, 0.72, 0.86]   # quality floor by complexity 0..3
+  risk_bonus: [0.0, 0.04, 0.08]         # added to the floor by risk 0..2
+  est_output_tokens: [300, 800, 2000, 4000]
+  load_penalty: 0.25                    # +25% effective cost per in-flight request on a model
+  sticky_ttl: 2h
+  fallback_model: anthropic/claude-sonnet-5
+  retries: 2                            # on 429/5xx, try the next-best models
+  reasoning_effort: [low, low, medium, high]   # by complexity, only if the client didn't set one
+
+topics:
+  code-gen: Writing new code, functions, scripts, or features.
+  code-review: Reviewing existing code or a diff for quality, bugs, or style.
+  debugging: Diagnosing an error, crash, failing test, or unexpected behaviour.
+  security: Vulnerabilities, secrets, auth, permissions, or attack surface.
+  docs: Writing or updating documentation, READMEs, changelogs, comments.
+  data-sql: Databases, SQL queries, schemas, migrations, data analysis.
+  infra-devops: CI/CD, Docker, Kubernetes, cloud, deployment, monitoring.
+  architecture: System design, trade-offs, planning larger technical changes.
+  writing: "Non-code prose: emails, blog posts, meeting notes, summaries."
+  chat: Small talk, quick factual questions, or simple how-to answers.
+
+# Skill values are SEED GUESSES (0..1), not measured. Re-fit them from data/decisions.jsonl outcomes.
+models:
+  - id: qwen/qwen3.7-flash
+    price: {in: 0.03, out: 0.13}
+    context: 1000000
+    tools: true
+    vision: true
+    output_multiplier: 3  # thinks a lot even on trivial prompts (1.8k reasoning tokens for "say hi")
+    default_skill: 0.45
+    skills: {chat: 0.75, writing: 0.60, docs: 0.55}
+
+  - id: deepseek/deepseek-v4.1-flash
+    price: {in: 0.04, out: 0.64}
+    context: 1048576
+    tools: true
+    vision: true
+    default_skill: 0.60
+    skills: {chat: 0.80, docs: 0.70, writing: 0.65, code-gen: 0.70, data-sql: 0.66, debugging: 0.62, security: 0.50, architecture: 0.52}
+
+  - id: openai/gpt-5.6-luna
+    price: {in: 0.20, out: 1.20}
+    context: 1050000
+    tools: true
+    vision: true
+    default_skill: 0.68
+    skills: {writing: 0.78, docs: 0.76, code-gen: 0.74, code-review: 0.70, infra-devops: 0.72}
+
+  - id: anthropic/claude-sonnet-5
+    price: {in: 2.00, out: 10.00}
+    context: 1000000
+    tools: true
+    vision: true
+    default_skill: 0.82
+    skills: {code-gen: 0.88, code-review: 0.87, debugging: 0.87, security: 0.84, architecture: 0.82, infra-devops: 0.84, data-sql: 0.84}
+
+  - id: anthropic/claude-opus-5.5
+    price: {in: 4.00, out: 20.00}
+    context: 1000000
+    tools: true
+    vision: true
+    default_skill: 0.92
+    skills: {architecture: 0.96, security: 0.95, code-review: 0.94, debugging: 0.94, code-gen: 0.94}
+    daily_budget_usd: 10
+
+  # Example local model (Ollama / LM Studio / mlx_lm.server, OpenAI-compatible):
+  # - id: qwen3.5:9b
+  #   base_url: http://127.0.0.1:11434/v1
+  #   local: true
+  #   price: {in: 0, out: 0}
+  #   context: 32768
+  #   tools: true
+  #   default_skill: 0.50
+  #   skills: {chat: 0.70, writing: 0.55}

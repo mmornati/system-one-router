@@ -1,0 +1,27 @@
+# secrets — only .env.example is tracked
+.env
+.env.*
+!.env.example
+
+# build output
+/bin/
+/dist/
+
+# runtime data: decision logs contain real prompts, sidecar logs
+/data/
+*.log
+
+# local benchmark runs (publish a curated copy with `make site`)
+bench/results/
+
+# Laya sidecar virtualenv / Python caches / HF cache overrides
+sidecar/.venv/
+__pycache__/
+*.pyc
+.cache/
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
