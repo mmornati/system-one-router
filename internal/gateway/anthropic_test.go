@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mmornati/system-one-router/internal/config"
@@ -276,6 +277,50 @@ func TestCountTokensAndModels(t *testing.T) {
 	}
 }
 
+// TestMessagesCheckSkipsTruncated checks that a /v1/messages answer cut off by the client's
+// max_tokens (stop_reason "max_tokens") is never sent to the answer check, so it can't be
+// misjudged as incomplete and escalated for no reason.
+func TestMessagesCheckSkipsTruncated(t *testing.T) {
+	cfg, err := config.Load("../../config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routing.Check.Enabled = true
+	log := filepath.Join(t.TempDir(), "decisions.jsonl")
+	checks := &atomic.Int32{}
+	jev := fakeDecisions(t, 0.1, checks) // would fail the check and escalate, if run
+	t.Cleanup(jev.Close)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"type": "message", "role": "assistant", "model": "qwen/qwen3.7-flash",
+			"content": []any{map[string]any{"type": "text", "text": "cut off mid-s"}}, "stop_reason": "max_tokens",
+			"usage": map[string]any{"input_tokens": 12, "output_tokens": 200, "cost": 0.001}})
+	}))
+	t.Cleanup(up.Close)
+	sel := &decision.Selector{Mode: "jev", Providers: map[string]decision.Provider{
+		"jev": decision.NewHTTPProvider("jev", jev.URL, "typesafe/jev-1.13", "k", false, 4000, cfg.Decision.Providers["jev"].Timeout),
+	}}
+	rt := router.New(cfg, sel)
+	client := upstream.New(up.URL, "gateway-key")
+	l, err := store.Open(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	gw := httptest.NewServer((&Server{Cfg: cfg, Router: rt, Upstream: func(string) *upstream.Client { return client }, Log: l, LogPath: log}).Handler())
+	t.Cleanup(gw.Close)
+
+	res := postH(t, gw.URL+"/v1/messages", `{"model":"auto","max_tokens":200,"messages":[{"role":"user","content":"hello!"}]}`, nil)
+	io.ReadAll(res.Body)
+	if res.Header.Get("X-Router-Checked") != "" || res.Header.Get("X-Router-Escalated") != "" || checks.Load() != 0 {
+		t.Fatalf("truncated answer must skip the check: checked=%q escalated=%q checks=%d",
+			res.Header.Get("X-Router-Checked"), res.Header.Get("X-Router-Escalated"), checks.Load())
+	}
+	if got := events(t, log, "check"); len(got) != 0 {
+		t.Fatalf("check events: %v", got)
+	}
+}
+
 func TestMessagesCheckEscalates(t *testing.T) {
 	e := newAnthropicServer(t, "", func(c *config.Config, s *decision.Selector) {
 		c.Routing.Check.Enabled = true
@@ -304,6 +349,9 @@ func TestAnthropicText(t *testing.T) {
 	}
 	if _, ok := anthropicText([]byte(`{"content":[{"type":"text","text":"let me look"},{"type":"tool_use","id":"t"}],"stop_reason":"tool_use"}`)); ok {
 		t.Fatal("tool_use turn must not be checked")
+	}
+	if _, ok := anthropicText([]byte(`{"content":[{"type":"text","text":"cut off mid-s"}],"stop_reason":"max_tokens"}`)); ok {
+		t.Fatal("answer truncated by max_tokens must not be checked")
 	}
 }
 

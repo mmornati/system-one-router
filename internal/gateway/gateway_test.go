@@ -360,10 +360,11 @@ func TestStatsAndDashboard(t *testing.T) {
 }
 
 type checkOpts struct {
-	disabled  bool
-	pOK       float64
-	failModel string // upstream answers 500 for this model
-	toolCalls bool   // upstream answers with a tool call instead of text
+	disabled     bool
+	pOK          float64
+	failModel    string // upstream answers 500 for this model
+	toolCalls    bool   // upstream answers with a tool call instead of text
+	finishReason string // upstream's choices[0].finish_reason, e.g. "length" for a truncated answer
 }
 
 type checkEnv struct {
@@ -412,8 +413,12 @@ func newCheckServer(t *testing.T, o checkOpts) *checkEnv {
 		if o.toolCalls {
 			msg = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": "c1", "type": "function"}}}
 		}
+		choice := map[string]any{"message": msg}
+		if o.finishReason != "" {
+			choice["finish_reason"] = o.finishReason
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"model": model, "choices": []any{map[string]any{"message": msg}},
+		json.NewEncoder(w).Encode(map[string]any{"model": model, "choices": []any{choice},
 			"usage": map[string]any{"cost": 0.001, "prompt_tokens": 12, "completion_tokens": 34}})
 	}))
 	t.Cleanup(up.Close)
@@ -518,6 +523,18 @@ func TestCheckEscalationFailureKeepsOriginal(t *testing.T) {
 	}
 }
 
+func TestAssistantText(t *testing.T) {
+	if s, ok := assistantText([]byte(`{"choices":[{"finish_reason":"stop","message":{"content":"hi"}}]}`)); !ok || s != "hi" {
+		t.Fatalf("text: %q %v", s, ok)
+	}
+	if _, ok := assistantText([]byte(`{"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[{"id":"c1"}]}}]}`)); ok {
+		t.Fatal("tool-call turn must not be checked")
+	}
+	if _, ok := assistantText([]byte(`{"choices":[{"finish_reason":"length","message":{"content":"cut off mid-sent"}}]}`)); ok {
+		t.Fatal("answer truncated by max_tokens (finish_reason length) must not be checked")
+	}
+}
+
 func TestCheckSkipped(t *testing.T) {
 	cases := []struct {
 		name string
@@ -526,6 +543,7 @@ func TestCheckSkipped(t *testing.T) {
 	}{
 		{"streaming", checkOpts{pOK: 0.1}, `{"model":"auto","stream":true,"messages":[{"role":"user","content":"hello!"}]}`},
 		{"tool calls", checkOpts{pOK: 0.1, toolCalls: true}, hello},
+		{"truncated by max_tokens", checkOpts{pOK: 0.1, finishReason: "length"}, hello},
 		{"disabled", checkOpts{pOK: 0.1, disabled: true}, hello},
 		{"explicit model", checkOpts{pOK: 0.1}, `{"model":"qwen/qwen3.7-flash","messages":[{"role":"user","content":"hello!"}]}`},
 	}

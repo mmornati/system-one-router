@@ -174,11 +174,15 @@ routing:
 ```
 
 It is skipped for streaming requests, sticky follow-ups, fallback routes, tool-call turns, empty answers,
-non-200 responses, and when the model used is already the strongest capable one. Streaming is excluded
-because the client already has the answer by the time it can be judged. The check uses the same
-provider choice as routing, so a private request goes to the local provider when routing would use it,
-and is not checked at all under `private: local_only` without one. An answer that trips the secret
-pre-check counts as private too. Under `local_only`, a private request only escalates to a local model.
+answers truncated by the client's own `max_tokens` (OpenAI `finish_reason: "length"`, Anthropic
+`stop_reason: "max_tokens"` — an incomplete answer would otherwise almost always fail the check and
+escalate, for no reason other than a small `max_tokens`), non-200 responses, and when the model used is
+already the strongest capable one. Streaming is excluded because the client already has the answer by the
+time it can be judged. The check uses the same provider choice as routing, so a private request goes to
+the local provider when routing would use it, and is not checked at all under `private: local_only`
+without one. An answer that trips the secret pre-check counts as private too. Under `local_only`, a
+private request only escalates to a local model. A skipped check logs nothing, same as the other skip
+cases above.
 
 Cost: one extra decision call per checked answer (about $0.00004 with Jev, ~300 ms), plus a second model
 call for the answers that fail.
