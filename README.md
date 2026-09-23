@@ -35,6 +35,19 @@ Response headers: `X-Router-Model`, `X-Router-Reason`, `X-Router-Topic`, `X-Rout
 
 Point clients at it with `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`. For OpenCode, add a provider with that base URL and the model `auto`.
 
+Other endpoints: `GET /v1/models`, `GET /stats?days=N` (aggregated stats as JSON; `days=0` is all time), `GET /dashboard` (a dashboard over those stats), `POST /feedback`, `GET /healthz`.
+
+## Dashboard
+
+`GET /dashboard` is a single self-contained HTML page (no external JS) that fetches `/stats` and
+renders it: request/spend/savings/escalation/shadow-agreement tiles, a stacked daily cost-per-model
+chart, a per-model table (cost, tokens, latency percentiles, errors), routing-reason and topic/
+complexity/risk bars, and shadow-agreement, check-escalation and feedback sections. A day selector
+(1 / 7 / 30 / all) re-fetches `/stats` with a different `days` value. It reads `data/decisions.jsonl`
+each time it's called, so it always reflects the current log.
+
+<!-- dashboard screenshot -->
+
 ## Benchmark
 
 `cmd/bench` runs the 80 labelled prompts in `bench/cases.json` through each decision provider. Groups: core dev work, multilingual, inputs longer than 512 tokens, tricky/ambiguous, private data. It records:
@@ -105,9 +118,10 @@ cmd/mcp           MCP server exposing route / delegate / feedback to agents
 sidecar/          local Laya server (Decisions API shape)
 internal/decision Decisions API client + provider selection (jev / laya / auto)
 internal/router   request summary, privacy pre-check, scoring, sticky/load/budget state
-internal/gateway  OpenAI-compatible handlers, retry, streaming + cost metering
+internal/gateway  OpenAI-compatible handlers, retry, streaming + cost metering, dashboard/stats
 internal/upstream upstream client + live price refresh
 internal/store    JSONL event log
+internal/stats    aggregates decisions.jsonl for the dashboard
 bench/            labelled cases (cases.json) + TypeScript Jev/LLM check
 site/             published benchmark report (GitHub Pages)
 ```
@@ -199,4 +213,4 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 - [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first); pad inputs to fixed lengths to avoid MPS recompiles.
 - [ ] Anthropic Messages API endpoint, so Claude Code-style clients can use the gateway.
 - [x] MCP server exposing `route` / `delegate` to agents.
-- [ ] Dashboard over `decisions.jsonl` (cost per model, agreement, escalations).
+- [x] Dashboard over `decisions.jsonl` (cost per model, agreement, escalations).

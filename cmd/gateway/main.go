@@ -71,7 +71,7 @@ func run(cfgPath, envPath string) error {
 		log.Write("shadow", ev)
 	}
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: (&gateway.Server{Cfg: cfg, Router: rt, Upstream: upstreams(cfg, up), Log: log}).Handler(),
+	srv := &http.Server{Addr: cfg.Listen, Handler: (&gateway.Server{Cfg: cfg, Router: rt, Upstream: upstreams(cfg, up), Log: log, LogPath: cfg.LogPath}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -6,20 +6,26 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mmornati/system-one-router/internal/config"
 	"github.com/mmornati/system-one-router/internal/router"
+	"github.com/mmornati/system-one-router/internal/stats"
 	"github.com/mmornati/system-one-router/internal/store"
 	"github.com/mmornati/system-one-router/internal/upstream"
 )
+
+//go:embed dashboard.html
+var dashboardHTML []byte
 
 const maxBody = 32 << 20
 
@@ -37,6 +43,8 @@ type Server struct {
 	Router   *router.Router
 	Upstream func(model string) *upstream.Client
 	Log      *store.Log
+	// LogPath is the JSONL event log path (cfg.LogPath), read separately from Log for /stats.
+	LogPath string
 }
 
 func (s *Server) Handler() http.Handler {
@@ -45,8 +53,50 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /route", s.route)
 	mux.HandleFunc("POST /feedback", s.feedback)
 	mux.HandleFunc("GET /v1/models", s.models)
+	mux.HandleFunc("GET /stats", s.stats)
+	mux.HandleFunc("GET /dashboard", s.dashboard)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	return mux
+}
+
+// stats aggregates the event log into dashboard numbers. days=N limits it to the last N days
+// (default 7); days=0 means all time.
+func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			httpError(w, http.StatusBadRequest, "days must be a non-negative integer")
+			return
+		}
+		days = n
+	}
+	var since time.Time
+	if days > 0 {
+		since = time.Now().UTC().AddDate(0, 0, -days)
+	}
+	f, err := os.Open(s.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			st, _ := stats.Compute(bytes.NewReader(nil), s.Cfg, since)
+			writeJSON(w, http.StatusOK, st)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer f.Close()
+	st, err := stats.Compute(f, s.Cfg, since)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) dashboard(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(dashboardHTML)
 }
 
 func isAuto(model string) bool { return model == "auto" || model == "router/auto" || model == "" }
