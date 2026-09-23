@@ -68,14 +68,17 @@ function el(tag, attrs, children) {
 function kpis(s) {
   const t = s.totals || {};
   const sav = s.savings || {};
-  const escPct = t.routed ? 100 * (s.reasons && s.reasons.escalated || 0) / t.routed : 0;
+  const floorPct = t.routed ? 100 * (s.reasons && s.reasons['no model cleared the floor'] || 0) / t.routed : 0;
+  const c = s.checks || {};
+  const checkPct = c.count ? 100 * (c.escalations || 0) / c.count : null;
   const shadowVals = Object.values(s.shadow || {});
   const shadowAgree = shadowVals.length ? shadowVals.reduce((a,x)=>a+x.topic_agree_pct,0)/shadowVals.length : null;
   const items = [
     ['Requests', t.requests || 0],
     ['Spend', fmtUsd2(t.total_cost_usd)],
     ['Savings vs priciest', sav.counterfactual_cost_usd ? fmtUsd2(sav.savings_usd) + ' (' + fmtPct(sav.savings_pct) + ')' : '—'],
-    ['Escalation rate', fmtPct(escPct)],
+    ['Escalated after check', checkPct === null ? '—' : fmtPct(checkPct)],
+    ['No model cleared the floor', fmtPct(floorPct)],
     ['Shadow agreement', shadowAgree === null ? '—' : fmtPct(shadowAgree)],
   ];
   const wrap = el('div', {class:'kpis'});
@@ -209,7 +212,7 @@ function checksSection(c) {
   c = c || {};
   if (!c.count) return el('div', {class:'empty'}, ['No check events yet.']);
   const wrap = el('div', {class:'card'});
-  wrap.appendChild(el('p', {}, [`${c.count} checks · ${fmtPct(c.pass_rate_pct)} pass rate · ${c.escalations} escalations · ${fmtUsd(c.cost_usd)} check cost`]));
+  wrap.appendChild(el('p', {}, [`${c.count} checks · ${fmtPct(c.pass_rate_pct)} pass rate · ${c.escalations} escalated after check · ${c.errors || 0} check errors · ${fmtUsd(c.cost_usd)} check cost`]));
   if (c.escalations) wrap.appendChild(barList(c.escalation_pairs, c.escalations));
   return wrap;
 }

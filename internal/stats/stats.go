@@ -36,18 +36,18 @@ type Stats struct {
 }
 
 type Totals struct {
-	Requests        int     `json:"requests"` // chat events
+	Requests        int     `json:"requests"` // chat requests (an escalated request counts once)
 	Routed          int     `json:"routed"`
 	Passthrough     int     `json:"passthrough"`
 	Refused         int     `json:"refused"`
 	Errors          int     `json:"errors"` // status >= 400
 	DryRoutes       int     `json:"dry_routes"`
-	TotalCostUSD    float64 `json:"total_cost_usd"`
+	TotalCostUSD    float64 `json:"total_cost_usd"` // every upstream call, escalations included
 	DecisionCostUSD float64 `json:"decision_cost_usd"`
 }
 
 type ModelStats struct {
-	Requests         int     `json:"requests"`
+	Requests         int     `json:"requests"` // upstream calls, escalations included
 	CostUSD          float64 `json:"cost_usd"`
 	PromptTokens     int64   `json:"prompt_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
@@ -85,7 +85,8 @@ type ShadowStats struct {
 }
 
 type Checks struct {
-	Count           int            `json:"count"`
+	Count           int            `json:"count"` // completed checks (errors excluded)
+	Errors          int            `json:"errors"`
 	Passed          int            `json:"passed"`
 	PassRatePct     float64        `json:"pass_rate_pct"`
 	Escalations     int            `json:"escalations"`
@@ -128,6 +129,7 @@ type chatData struct {
 	PromptTokens     int64            `json:"prompt_tokens"`
 	CompletionTokens int64            `json:"completion_tokens"`
 	LatencyMs        int64            `json:"latency_ms"`
+	EscalatedFrom    string           `json:"escalated_from"` // set on the re-sent call of a failed check
 }
 
 type shadowData struct {
@@ -152,6 +154,7 @@ type checkData struct {
 	EscalatedTo  string  `json:"escalated_to"`
 	CheckCostUSD float64 `json:"check_cost_usd"`
 	CheckMs      int64   `json:"check_ms"`
+	Error        string  `json:"error"`
 }
 
 // modelAgg accumulates per-model numbers before percentiles are derived.
@@ -234,18 +237,24 @@ func processLine(line []byte, since time.Time, st *Stats, models map[string]*mod
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
 			return
 		}
-		st.Totals.Requests++
 		st.Totals.TotalCostUSD += d.CostUSD
-		if d.Status >= 400 {
-			st.Totals.Errors++
+		// An escalated call is the same request as the chat event before it (same id): count its
+		// spend, tokens and latency, but not the request, its decision or its status again (the
+		// client got the first answer when the escalated call failed).
+		escalated := d.EscalatedFrom != ""
+		if !escalated {
+			st.Totals.Requests++
+			if d.Status >= 400 {
+				st.Totals.Errors++
+			}
+			if d.Decision != nil {
+				st.Totals.Routed++
+				recordDecision(d.Decision, st, decisionLatencies)
+			} else {
+				st.Totals.Passthrough++
+			}
 		}
-		if d.Decision != nil {
-			st.Totals.Routed++
-			recordDecision(d.Decision, st, decisionLatencies)
-		} else {
-			st.Totals.Passthrough++
-		}
-		if len(d.Failed) > 0 {
+		if len(d.Failed) > 0 && !escalated {
 			st.Retries.Requests++
 			for _, m := range d.Failed {
 				st.Retries.PerModel[m]++
@@ -285,7 +294,9 @@ func processLine(line []byte, since time.Time, st *Stats, models map[string]*mod
 
 			if priciest != nil && (d.PromptTokens > 0 || d.CompletionTokens > 0) {
 				st.Savings.ActualCostUSD += d.CostUSD
-				st.Savings.CounterfactualCostUSD += (float64(d.PromptTokens)*priciest.Price.In + float64(d.CompletionTokens)*priciest.Price.Out) / 1e6
+				if !escalated { // the priciest model would have answered once
+					st.Savings.CounterfactualCostUSD += (float64(d.PromptTokens)*priciest.Price.In + float64(d.CompletionTokens)*priciest.Price.Out) / 1e6
+				}
 			}
 		}
 
@@ -348,6 +359,10 @@ func processLine(line []byte, since time.Time, st *Stats, models map[string]*mod
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
 			return
 		}
+		if d.Error != "" {
+			st.Checks.Errors++
+			return
+		}
 		st.Checks.Count++
 		st.Checks.CostUSD += d.CheckCostUSD
 		if d.Passed {
@@ -387,8 +402,8 @@ func reasonCategory(reason string) string {
 		return "other"
 	case strings.HasPrefix(reason, "sticky"):
 		return "sticky"
-	case strings.HasPrefix(reason, "escalated"):
-		return "escalated"
+	case strings.HasPrefix(reason, "escalated"): // routing's own escalation, not check-and-escalate
+		return "no model cleared the floor"
 	case strings.HasPrefix(reason, "fallback"):
 		return "fallback"
 	case strings.Contains(reason, "no capable model") || strings.Contains(reason, "no local model"):

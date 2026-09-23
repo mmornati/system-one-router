@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -169,6 +170,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	body["usage"] = map[string]any{"include": true} // ask OpenRouter to report cost
 
+	stream := body["stream"] == true
 	var failed []string
 	for i, m := range attempts {
 		body["model"] = m
@@ -193,16 +195,69 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		s.forward(w, res, m, d, id, failed, body["stream"] == true, time.Since(start))
+		if stream || isSSE(res) {
+			s.forward(w, res, m, d, id, failed, stream, time.Since(start))
+			release()
+			return
+		}
+		a := readAnswer(res, m, start)
 		release()
+		s.logChat(id, d, a, failed, false, "")
+		writeAnswer(w, s.checkAndEscalate(r, body, req, d, id, a, failed), d, failed)
 		return
 	}
 }
 
+// forward relays a streaming response to the client as it arrives (it cannot be checked: the client
+// already has the answer by the time it is complete).
 func (s *Server) forward(w http.ResponseWriter, res *http.Response, model string, d *router.Decision, id string, failed []string, stream bool, latency time.Duration) {
 	defer res.Body.Close()
+	setHeaders(w, res.Header, model, d, failed)
+	w.WriteHeader(res.StatusCode)
+	u := copyAndMeter(w, res.Body, isSSE(res))
+	s.logChat(id, d, &answer{model: model, status: res.StatusCode, usage: u, latency: latency}, failed, stream, "")
+	if res.StatusCode >= 400 {
+		slog.Warn("upstream error", "model", model, "status", res.StatusCode)
+	}
+}
+
+// answer is a buffered non-streaming upstream response.
+type answer struct {
+	model   string
+	status  int
+	header  http.Header
+	body    []byte
+	usage   usage
+	latency time.Duration
+}
+
+func isSSE(res *http.Response) bool {
+	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
+}
+
+func readAnswer(res *http.Response, model string, start time.Time) *answer {
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	return &answer{model: model, status: res.StatusCode, header: res.Header, body: b, usage: extractUsage(b), latency: time.Since(start)}
+}
+
+func writeAnswer(w http.ResponseWriter, a *answer, d *router.Decision, failed []string) {
+	setHeaders(w, a.header, a.model, d, failed)
+	for _, h := range []string{"X-Router-Checked", "X-Router-Escalated"} {
+		if v := a.header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.WriteHeader(a.status)
+	w.Write(a.body)
+	if a.status >= 400 {
+		slog.Warn("upstream error", "model", a.model, "status", a.status)
+	}
+}
+
+func setHeaders(w http.ResponseWriter, up http.Header, model string, d *router.Decision, failed []string) {
 	for _, h := range []string{"Content-Type", "Cache-Control"} {
-		if v := res.Header.Get(h); v != "" {
+		if v := up.Get(h); v != "" {
 			w.Header().Set(h, v)
 		}
 	}
@@ -212,19 +267,107 @@ func (s *Server) forward(w http.ResponseWriter, res *http.Response, model string
 			w.Header().Set("X-Router-Failed", strings.Join(failed, ","))
 		}
 	}
-	w.WriteHeader(res.StatusCode)
-	u := copyAndMeter(w, res.Body, strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream"))
-	if u.CostUSD > 0 {
-		s.Router.Tracker.AddSpend(model, u.CostUSD)
+}
+
+// logChat meters and logs one upstream answer. escalatedFrom is set on the re-sent request of a failed check.
+func (s *Server) logChat(id string, d *router.Decision, a *answer, failed []string, stream bool, escalatedFrom string) {
+	if a.usage.CostUSD > 0 {
+		s.Router.Tracker.AddSpend(a.model, a.usage.CostUSD)
 	}
-	s.Log.Write("chat", map[string]any{
-		"id": id, "decision": d, "model": model, "failed": failed, "status": res.StatusCode,
-		"cost_usd": u.CostUSD, "prompt_tokens": u.PromptTokens, "completion_tokens": u.CompletionTokens,
-		"reasoning_tokens": u.ReasoningTokens, "latency_ms": latency.Milliseconds(), "stream": stream,
-	})
-	if res.StatusCode >= 400 {
-		slog.Warn("upstream error", "model", model, "status", res.StatusCode)
+	ev := map[string]any{
+		"id": id, "decision": d, "model": a.model, "failed": failed, "status": a.status,
+		"cost_usd": a.usage.CostUSD, "prompt_tokens": a.usage.PromptTokens, "completion_tokens": a.usage.CompletionTokens,
+		"reasoning_tokens": a.usage.ReasoningTokens, "latency_ms": a.latency.Milliseconds(), "stream": stream,
 	}
+	if escalatedFrom != "" {
+		ev["escalated_from"] = escalatedFrom
+	}
+	s.Log.Write("chat", ev)
+}
+
+// checkAndEscalate asks the decision model whether a is a good enough answer and, when it is not,
+// re-sends the request once to a stronger model. It returns the answer to give the client: a itself
+// unless the escalated call succeeded.
+func (s *Server) checkAndEscalate(r *http.Request, body map[string]any, req router.Request, d *router.Decision, id string, a *answer, failed []string) *answer {
+	c := s.Cfg.Routing.Check
+	if !c.Enabled || d == nil || d.Signals == nil || d.Signals.Complexity < c.MinComplexity || a.status != http.StatusOK ||
+		r.Context().Err() != nil { // client gone: nobody to give a better answer to
+		return a
+	}
+	text, ok := assistantText(a.body)
+	if !ok {
+		return a
+	}
+	target := s.Router.EscalationTarget(d, a.model, failed)
+	if target == "" {
+		return a // already the strongest capable model: nothing to escalate to
+	}
+	pOK, cost, ms, provider, err := s.Router.Check(r.Context(), req, text, d)
+	if errors.Is(err, router.ErrCheckSkipped) {
+		return a
+	}
+	if err != nil {
+		slog.Warn("answer check failed", "model", a.model, "err", err)
+		s.Log.Write("check", map[string]any{"id": id, "model": a.model, "error": err.Error()})
+		return a
+	}
+	checked := strconv.FormatFloat(pOK, 'f', 2, 64)
+	a.header.Set("X-Router-Checked", checked)
+	passed, final := pOK >= c.Threshold, a
+	if !passed {
+		if e := s.escalate(r, body, target, id, d, a.model); e != nil {
+			e.header.Set("X-Router-Checked", checked)
+			e.header.Set("X-Router-Escalated", a.model+"->"+target)
+			s.Router.Tracker.SetSticky(req.StickyKey(), target)
+			final = e
+		}
+	}
+	escalatedTo := ""
+	if final != a {
+		escalatedTo = final.model
+	}
+	s.Log.Write("check", map[string]any{"id": id, "model": a.model, "p_ok": pOK, "passed": passed,
+		"escalated_to": escalatedTo, "check_cost_usd": cost, "check_ms": ms, "provider": provider})
+	return final
+}
+
+// escalate re-sends the request to model, once. It returns nil unless the call succeeded.
+func (s *Server) escalate(r *http.Request, body map[string]any, model, id string, d *router.Decision, from string) *answer {
+	body["model"] = model
+	payload, _ := json.Marshal(body)
+	release := s.Router.Tracker.Acquire(model)
+	defer release()
+	start := time.Now()
+	res, err := s.Upstream(model).Post(r.Context(), "/chat/completions", payload, r.Header)
+	if err != nil {
+		slog.Warn("escalation failed", "model", model, "err", err)
+		return nil
+	}
+	e := readAnswer(res, model, start)
+	s.logChat(id, d, e, nil, false, from)
+	if e.status != http.StatusOK {
+		slog.Warn("escalation failed", "model", model, "status", e.status)
+		return nil
+	}
+	return e
+}
+
+// assistantText returns the first choice's text and whether it is a final answer worth checking:
+// non-empty and not a tool-call turn.
+func assistantText(b []byte) (string, bool) {
+	var v struct {
+		Choices []struct {
+			Message struct {
+				Content   any               `json:"content"`
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(b, &v) != nil || len(v.Choices) == 0 || len(v.Choices[0].Message.ToolCalls) > 0 {
+		return "", false
+	}
+	text, _ := content(v.Choices[0].Message.Content)
+	return text, strings.TrimSpace(text) != ""
 }
 
 // usage is the token/cost accounting extracted from an upstream response.

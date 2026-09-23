@@ -83,7 +83,10 @@ var secretPatterns = []*regexp.Regexp{
 
 // LooksPrivate is a cheap local pre-check, run before any data leaves the machine.
 func (r Request) LooksPrivate() bool {
-	all := r.System + "\n" + r.FirstUser + "\n" + r.LastUser
+	return looksPrivate(r.System + "\n" + r.FirstUser + "\n" + r.LastUser)
+}
+
+func looksPrivate(all string) bool {
 	for _, p := range secretPatterns {
 		if p.MatchString(all) {
 			return true

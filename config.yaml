@@ -36,6 +36,11 @@ routing:
   fallback_model: anthropic/claude-sonnet-5
   retries: 2                            # on 429/5xx, try the next-best models
   reasoning_effort: [low, low, medium, high]   # by complexity, only if the client didn't set one
+  check:                 # non-streaming "auto" requests: ask the decision model if the answer is good, escalate if not
+    enabled: false       # one extra decision call per checked answer (~$0.00004 with Jev)
+    threshold: 0.5       # P(answer ok) below this re-sends the request to a stronger model
+    max_answer_chars: 3000
+    min_complexity: 0    # only check requests at least this complex (0..3)
 
 topics:
   code-gen: Writing new code, functions, scripts, or features.
