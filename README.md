@@ -83,7 +83,15 @@ Reading it:
 - **Jev is usable as-is.**
 - **Laya out of the box is not.** It is rarely confident, so the router plays safe and bumps most requests to Sonnet/Opus. The routes end up more expensive than Jev's, not cheaper.
 - **When Laya English is confident, it is right**, which is what makes it a candidate for fine-tuning on Jev-labelled traffic (shadow mode).
-- **Latency:** Laya on MPS takes about 30–70 ms per call for a repeated input shape, but 200–350 ms when the sequence length changes. The CPU is slower still (517 ms p50).
+- **Latency:** Laya on MPS takes about 30–70 ms per call for a repeated input shape, but pays a one-off kernel-compile tax the first time a call uses a sequence length MPS hasn't seen yet (historically up to 200–350 ms). `sidecar/laya_server.py --pad-buckets` rounds every call's token length up to a fixed bucket so MPS only ever compiles a handful of shapes (warmed at `--preload` time), which is output-preserving (see below) - but **on the currently installed stack (torch 2.14, macOS 26, Apple M4) it measured no latency win, so it defaults to off (`--pad-buckets none`)**. Steady-state (second-pass) numbers on 40 varied-length prompts from `bench/cases.json`, English checkpoint, MPS:
+
+  | | p50 | p95 |
+  |---|---|---|
+  | unpadded (default) | 100 ms | 663 ms |
+  | padded, coarse buckets (64/128/256/512/1024) | 163 ms | 678 ms |
+  | padded, fine buckets (every 32 to 512, every 64 to 1024) | 141 ms | 837 ms |
+
+  Neither bucket set beats unpadded on p50 or p95: the shape-recompile tax on this stack is smaller than the extra attention compute padding spends on the padded positions, and finer buckets don't recover it either. Pass `--pad-buckets 64,128,256,512,1024` (or your own list) to opt in on a stack where the recompile tax is worse - it's exact, not approximate: on 12 varied prompts through the English checkpoint the padded vs. unpadded probabilities were bit-identical (max diff 0.0), since the attention mask zeroes out padded positions everywhere they reach the model (encoder attention and the decision head's `src_key_padding_mask`). The CPU is slower still (517 ms p50) and shows no shape-change penalty at all.
 
 ## Laya sidecar
 
@@ -93,8 +101,10 @@ Models: `laya` (English, 512 tokens), `laya-multilingual` (1024 tokens, 100+ lan
 
 ```bash
 uv venv --python 3.12 sidecar/.venv && uv pip install --python sidecar/.venv/bin/python laya==0.3.6
-sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps]
+sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps] [--pad-buckets 64,128,256,512,1024|none]
 ```
+
+`--pad-buckets` (default `none`) optionally pads every call's tokenized sequence up to the smallest bucket that fits, so repeated calls reuse the same MPS shape instead of triggering a recompile. It's implemented as a small wrapper around `laya.agent.collate_items` (the function `Agent.system_one` uses to build the batch) that extends `input_ids`/`attention_mask` to the bucket length with zero-attention padding, so it doesn't require patching the `laya` package itself, and is output-preserving (verified bit-identical, see "Latency" above). It's off by default because it measured no latency win on the current torch/macOS stack - pass e.g. `--pad-buckets 64,128,256,512,1024` to opt in and measure on your own hardware; with `--preload`, each loaded checkpoint then also runs one warmup call per bucket at or under its `max_len`, so the first real request at any bucket size is already fast.
 
 ## Decision providers
 
@@ -210,7 +220,8 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 - [ ] Re-fit model skills from logged outcomes (retries, check failures, user feedback).
 - [ ] Check-and-escalate for non-streaming or background requests (a Jev yes/no on the answer).
 - [x] Laya sidecar (Python, MPS).
-- [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first); pad inputs to fixed lengths to avoid MPS recompiles.
+- [x] Optional fixed-length padding for Laya inputs (`--pad-buckets`, off by default: measured no steady-state latency gain on torch 2.14 / macOS 26 MPS; opt in and re-measure on other hardware).
+- [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first).
 - [ ] Anthropic Messages API endpoint, so Claude Code-style clients can use the gateway.
 - [x] MCP server exposing `route` / `delegate` to agents.
 - [x] Dashboard over `decisions.jsonl` (cost per model, agreement, escalations).
