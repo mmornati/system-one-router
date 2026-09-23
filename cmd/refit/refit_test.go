@@ -54,13 +54,15 @@ func (b *logBuilder) chat(model string, topics map[string]float64, cx, risk int,
 	return id
 }
 
-func (b *logBuilder) fit(t *testing.T) *Result {
+func (b *logBuilder) fit(t *testing.T) *Result { t.Helper(); return b.fitWith(t, defaultParams) }
+
+func (b *logBuilder) fitWith(t *testing.T, p Params) *Result {
 	t.Helper()
 	lg, err := ReadLog(bytes.NewReader(b.buf.Bytes()), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Fit(testConfig(t), lg, defaultParams)
+	return Fit(testConfig(t), lg, p)
 }
 
 func row(r *Result, model, topic string) *FitRow {
@@ -72,16 +74,47 @@ func row(r *Result, model, topic string) *FitRow {
 	return nil
 }
 
+type route struct {
+	topic    string
+	cx, risk int
+}
+
+// Two routes per model that the router would plausibly give it, overlapping between models so each
+// difficulty level has peers.
+var routes = map[string][]route{
+	qwen:                        {{"chat", 0, 0}, {"writing", 0, 0}},
+	deepseek:                    {{"docs", 1, 0}, {"chat", 0, 0}},
+	"openai/gpt-5.6-luna":       {{"writing", 1, 0}, {"docs", 0, 0}},
+	sonnet:                      {{"debugging", 2, 1}, {"code-gen", 1, 0}},
+	"anthropic/claude-opus-5.5": {{"architecture", 3, 1}, {"debugging", 2, 1}},
+}
+
+// population logs n answers per model and route, with checks scattered around pOK (±0.05,
+// deterministic): the reference the other outcomes are compared with.
+func (b *logBuilder) population(n int, pOK float64, models ...string) {
+	for i := range n {
+		for _, m := range models {
+			for _, r := range routes[m] {
+				id := b.chat(m, map[string]float64{r.topic: 1}, r.cx, r.risk, nil)
+				b.event("check", map[string]any{"id": id, "model": m, "p_ok": pOK + 0.05*float64(i%3-1)})
+			}
+		}
+	}
+}
+
+var others = []string{qwen, "openai/gpt-5.6-luna", sonnet, "anthropic/claude-opus-5.5"}
+
 func TestFitChecksMoveSkill(t *testing.T) {
 	var b logBuilder
+	b.population(30, 0.85, others...)
 	docs := map[string]float64{"docs": 1}
-	for range 40 { // deepseek passes every simple docs check...
+	for range 40 { // deepseek passes every simple docs check, better than the other models...
 		id := b.chat(deepseek, docs, 1, 0, nil)
 		b.event("check", map[string]any{"id": id, "model": deepseek, "p_ok": 0.97, "passed": true})
 	}
-	for range 40 { // ...and fails every simple debugging check.
+	for range 40 { // ...and fails most simple debugging checks.
 		id := b.chat(deepseek, map[string]float64{"debugging": 1}, 1, 0, nil)
-		b.event("check", map[string]any{"id": id, "model": deepseek, "p_ok": 0.1, "passed": false, "escalated_to": sonnet})
+		b.event("check", map[string]any{"id": id, "model": deepseek, "p_ok": 0.3, "passed": false, "escalated_to": sonnet})
 	}
 	r := b.fit(t)
 
@@ -93,46 +126,85 @@ func TestFitChecksMoveSkill(t *testing.T) {
 	if down == nil || !down.Change || down.Fitted >= down.Seed-0.1 {
 		t.Fatalf("debugging should drop a lot: %+v", down)
 	}
-	// Selection bias: passing easy prompts is weak evidence, failing them strong.
-	if up.Fitted-up.Seed >= down.Seed-down.Fitted {
-		t.Fatalf("asymmetry expected: up %+v down %+v", up, down)
-	}
-	if r.Checks != 80 || r.Outcomes != 80 {
+	if r.Checks != 320 || r.Outcomes != 320 {
 		t.Fatalf("counts: %+v", r)
 	}
 }
 
-func TestFitHardPromptsCountMore(t *testing.T) {
-	fitted := func(cx int) float64 {
+// The systematic-bias guard: labels well below 1 but no worse than anyone else's must not move skills.
+func TestFitUniformLabelsDoNotDrift(t *testing.T) {
+	for _, pOK := range []float64{0.6, 0.85} {
 		var b logBuilder
-		for range 30 {
-			id := b.chat(deepseek, map[string]float64{"docs": 1}, cx, 0, nil)
-			b.event("feedback", map[string]any{"id": id, "rating": "good"})
+		b.population(40, pOK, append(others, deepseek)...)
+		r := b.fit(t)
+		for _, f := range r.Fits {
+			if f.Change || abs(f.Fitted-f.Seed) > 0.015 {
+				t.Errorf("p_ok %.2f: %s/%s moved %.2f → %.2f", pOK, f.Model, f.Topic, f.Seed, f.Fitted)
+			}
 		}
-		return row(b.fit(t), deepseek, "docs").Fitted
+		if c := r.Calibration["check"]; c.MeanLabel >= c.MeanSeed {
+			t.Errorf("p_ok %.2f: labels should be below the seed predictions: %+v", pOK, c)
+		}
+
+		// Without calibration the same data drags every skill down: the bias being corrected.
+		lg, _ := ReadLog(bytes.NewReader(b.buf.Bytes()), time.Time{})
+		p := defaultParams
+		p.Calibrate = false
+		for _, f := range Fit(testConfig(t), lg, p).Fits {
+			if f.Fitted >= f.Seed {
+				t.Errorf("uncalibrated p_ok %.2f: %s/%s did not drop: %+v", pOK, f.Model, f.Topic, f)
+			}
+		}
 	}
-	if easy, hard := fitted(0), fitted(3); hard <= easy {
-		t.Fatalf("success on hard prompts should raise skill more: easy %.2f hard %.2f", easy, hard)
+}
+
+// Selection bias: a model is only compared with models that saw the same difficulty.
+func TestFitComparesAtSameDifficultyOnly(t *testing.T) {
+	var b logBuilder
+	b.population(30, 0.85, others...)
+	for range 40 { // no other model answered complexity-3, risk-0 prompts: no signal at all
+		id := b.chat(deepseek, map[string]float64{"docs": 1}, 3, 0, nil)
+		b.event("check", map[string]any{"id": id, "model": deepseek, "p_ok": 0.1})
+	}
+	if f := row(b.fit(t), deepseek, "docs"); f != nil {
+		t.Fatalf("no peers, yet fitted: %+v", f)
+	}
+
+	// Where peers exist, doing better or worse than them moves the skill, whatever the absolute label level.
+	fitted := func(peer, mine float64) FitRow {
+		var b logBuilder
+		b.population(30, peer, others...)
+		for range 40 {
+			id := b.chat(deepseek, map[string]float64{"docs": 1}, 0, 0, nil) // peers here: qwen, luna
+			b.event("check", map[string]any{"id": id, "model": deepseek, "p_ok": mine})
+		}
+		return *row(b.fit(t), deepseek, "docs")
+	}
+	if f := fitted(0.55, 0.85); !f.Change || f.Fitted <= f.Seed {
+		t.Fatalf("better than peers should go up: %+v", f)
+	}
+	if f := fitted(0.95, 0.65); !f.Change || f.Fitted >= f.Seed {
+		t.Fatalf("worse than peers should go down: %+v", f)
 	}
 }
 
 func TestFitBelowMinN(t *testing.T) {
 	var b logBuilder
-	for range 5 { // 5 checks + 5 feedback×2 = 15 < 20
+	b.population(30, 0.85, others[1:]...)
+	for range 15 { // 15 < 20
 		id := b.chat(qwen, map[string]float64{"chat": 1}, 0, 0, nil)
 		b.event("check", map[string]any{"id": id, "model": qwen, "p_ok": 0.0})
-		b.event("feedback", map[string]any{"id": id, "rating": "bad"})
 	}
-	r := b.fit(t)
-	f := row(r, qwen, "chat")
-	if f == nil || f.N != 15 || f.Change || len(r.Changes()) != 0 || f.Fitted >= f.Seed {
+	f := row(b.fit(t), qwen, "chat")
+	if f == nil || f.N != 15 || f.Change || f.Fitted >= f.Seed {
 		t.Fatalf("below min-n: %+v", f)
 	}
 }
 
 func TestFitTopicWeightsAndDefault(t *testing.T) {
 	var b logBuilder
-	for range 50 { // qwen has no explicit code-gen skill: it feeds default_skill too
+	b.population(30, 0.85, others[1:]...)
+	for range 50 { // qwen has no explicit code-gen skill: a new one is proposed...
 		id := b.chat(qwen, map[string]float64{"chat": 0.6, "code-gen": 0.4}, 0, 0, nil)
 		b.event("check", map[string]any{"id": id, "model": qwen, "p_ok": 0.0})
 	}
@@ -140,9 +212,27 @@ func TestFitTopicWeightsAndDefault(t *testing.T) {
 	if f := row(r, qwen, "chat"); f == nil || f.N != 30 {
 		t.Fatalf("chat weight: %+v", f)
 	}
-	cg, def := row(r, qwen, "code-gen"), row(r, qwen, "")
-	if cg == nil || def == nil || cg.N != 20 || def.N != 20 || !def.Change || def.Fitted >= def.Seed {
-		t.Fatalf("default: %+v %+v", cg, def)
+	// ...and those outcomes are not reused for default_skill.
+	if cg, def := row(r, qwen, "code-gen"), row(r, qwen, ""); cg == nil || cg.N != 20 || !cg.Change || cg.Fitted >= cg.Seed || def != nil {
+		t.Fatalf("code-gen/default: %+v %+v", cg, def)
+	}
+
+	// Spread thinly over implicit topics, no topic reaches min-n: default_skill is re-fitted instead.
+	b = logBuilder{}
+	b.population(30, 0.85, others[1:]...)
+	spread := map[string]float64{"code-gen": 0.25, "debugging": 0.25, "security": 0.25, "infra-devops": 0.25}
+	for range 50 {
+		id := b.chat(qwen, spread, 0, 0, nil)
+		b.event("check", map[string]any{"id": id, "model": qwen, "p_ok": 0.0})
+	}
+	r = b.fit(t)
+	if def := row(r, qwen, ""); def == nil || def.N != 50 || !def.Change || def.Fitted >= def.Seed {
+		t.Fatalf("default: %+v", def)
+	}
+	for _, f := range r.Fits {
+		if f.Model == qwen && f.Topic != "" && f.Change {
+			t.Fatalf("thin topic changed: %+v", f)
+		}
 	}
 }
 
@@ -185,7 +275,9 @@ func TestFitEscalationAndSkips(t *testing.T) {
 		b.event("check", map[string]any{"id": "s", "model": qwen, "error": "timeout"})
 		b.event("feedback", map[string]any{"id": "p", "rating": "bad"})
 	}
-	r := b.fit(t)
+	p := defaultParams
+	p.Calibrate = false // no peers in this log; this test is about attribution
+	r := b.fitWith(t, p)
 	if f := row(r, deepseek, "docs"); f == nil || f.N != 25 || f.Success != 0.2 {
 		t.Fatalf("check → first model only: %+v", f)
 	}

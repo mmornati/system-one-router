@@ -280,22 +280,37 @@ An answer counts toward every topic in proportion to its logged topic probabilit
 `{docs: 0.8, writing: 0.2}` answer adds 0.8 of an observation to docs and 0.2 to writing.
 `N_EFF` is the sum of these weights.
 
-**Method.** The router only sends a model the prompts whose floor it clears, so a cheap model's raw success
-rate comes from easy prompts. That rate says little about harder prompts. So every outcome is scored against
-the difficulty it was routed at, `d = min_skill[complexity] + risk_bonus[risk]` (the floor, on the same 0..1
-scale as skills), using a one-parameter logistic model (Rasch/Elo-style):
+**Method: compare with peers at the same difficulty.** Two biases make raw success rates misleading:
+- The router only sends a model the prompts whose floor it clears, so a cheap model's success rate comes from
+  easy prompts.
+- Labels have no absolute scale. `p_ok` rarely gets near 1 and ratings skew to "bad", while a model well above
+  its floor should succeed about 95% of the time. Read as absolute success rates, labels drag every skill down.
+
+So a label is only compared with the other models' labels from the same source (check or feedback) at the
+same difficulty, `d = min_skill[complexity] + risk_bonus[risk]` (the floor the answer was routed against):
 
 ```
-P(success | skill s, difficulty d) = σ((s − d) / scale + logit(target))      scale 0.1, target 0.8
+E[label | skill s] = σ(logit(peer) + (s − seed) / scale)        peer = the other models' mean label there
 ```
 
-In words, a model with skill `s` is expected to succeed 80% of the time on prompts at difficulty `s`.
-Succeeding on easy prompts is weak evidence, because the model was expected to succeed. Failing easy prompts
-is strong evidence, and succeeding on hard prompts moves the skill up a lot. The seed skill from
-`config.yaml` acts as the prior: `-prior` (10) pseudo-observations at difficulty = seed with success rate =
-target, so with no data the fit is exactly the seed. The fitted skill is the posterior mode, the root of one
-monotone equation, found by bisection. `default_skill` is fitted the same way, from outcomes on the topics
-the model has no explicit skill for.
+- A model whose labels are as good as its peers' keeps its seed, whatever the absolute label level.
+- Better or worse labels move it along a logistic curve: beating peers who already score 0.97 leaves little
+  headroom and is weak evidence, while falling behind them is strong evidence.
+- A difficulty level where no other model was seen carries no signal and does not count in `N_EFF`. The first
+  lines of the report show how much of the data that is. Exploration (below) creates peers.
+- The absolute level of the skills stays anchored to the seeds, because judge labels alone cannot identify it.
+
+The seed skill from `config.yaml` is the prior: `-prior` (10) pseudo-observations, so with no data the fit is
+exactly the seed. The fitted skill is the posterior mode, the root of one monotone equation, found by
+bisection. `default_skill` is fitted the same way, from outcomes on the topics the model has no explicit skill
+for, minus any topic that gets its own new skill in this run, so no outcome is counted twice.
+
+Knobs (flags):
+- `-scale 0.1`: being 0.1 of skill better multiplies the odds of a good label by e. The floors are about 0.15
+  apart, so one complexity tier is worth about 4.5 times the odds.
+- `-target 0.8`: the success rate expected at skill = difficulty. It shapes the prior's curvature.
+- `-calibrate=false`: reads labels as absolute success rates, `σ((s − d)/scale + logit(target))`. It is kept for
+  comparison, and it shows the downward bias.
 
 A change is proposed only when `N_EFF ≥ -min-n` (20) and `|fitted − seed| ≥ -min-delta` (0.02).
 `-write <path>` copies the config with those values changed. It edits the original text in place, so
@@ -309,23 +324,32 @@ make refit ARGS="-min-n 40 -prior 20"
 ```
 
 ```
-163 chat events: 163 routed with signals, 143 with an outcome (135 checks, 20 feedback)
+320 chat events: 320 routed with signals, 300 with an outcome (300 checks, 19 feedback)
 
-MODEL                         TOPIC      N_EFF  SUCCESS  SEED  FITTED  DELTA
-qwen/qwen3.7-flash            chat       20.0   94%      0.75  0.71    -0.04  *
-qwen/qwen3.7-flash            code-gen   36.0   72%      0.45  0.50    +0.05  *
-qwen/qwen3.7-flash            (default)  36.0   72%      0.45  0.50    +0.05  *
-deepseek/deepseek-v4.1-flash  debugging  59.0   49%      0.62  0.47    -0.15  *
-deepseek/deepseek-v4.1-flash  docs       48.0   92%      0.70  0.67    -0.03  *
-deepseek/deepseek-v4.1-flash  writing    12.0   92%      0.65  0.65    +0.00
+check    labels: n=300, mean 0.72 vs 0.91 predicted by the seeds; difficulty levels: 3, 20% of labels with no peer model
+feedback labels: n=38, mean 0.68 vs 0.89 predicted by the seeds; difficulty levels: 1, 0% of labels with no peer model
+
+MODEL                         TOPIC        N_EFF  SUCCESS  SEED  FITTED  DELTA
+qwen/qwen3.7-flash            chat         4.0    71%      0.75  0.74    -0.01
+qwen/qwen3.7-flash            code-gen     36.0   71%      0.45  0.43    -0.02  *
+deepseek/deepseek-v4.1-flash  debugging    54.0   51%      0.62  0.53    -0.09  *
+deepseek/deepseek-v4.1-flash  docs         48.0   78%      0.70  0.72    +0.02  *
+deepseek/deepseek-v4.1-flash  writing      12.0   78%      0.65  0.66    +0.01
+openai/gpt-5.6-luna           code-review  64.0   75%      0.70  0.80    +0.10  *
+openai/gpt-5.6-luna           writing      60.0   76%      0.78  0.78    +0.00
 
 Upstream reliability (429/5xx: availability, not counted against skill):
 MODEL                         ATTEMPTS  FAILED  FAIL_RATE
-deepseek/deepseek-v4.1-flash  100       5       5.0%
+deepseek/deepseek-v4.1-flash  103       3       2.9%
 ```
 
-(Synthetic log. deepseek's 92% on simple docs prompts still lowers its skill, because a model at 0.70 is
-expected to pass 95% of prompts at a 0.55 floor.)
+This is a synthetic log. Labels average 0.72 while the seeds predict 0.91, and still only relative
+differences move skills:
+- deepseek's debugging answers score below luna's code-review answers at the same difficulty, so deepseek's
+  debugging skill goes down and luna's code-review skill goes up.
+- qwen's chat row has almost no weight, because no other model answered those trivial prompts.
+
+With `-calibrate=false`, every skill in this log except qwen/code-gen drops by 0.05 to 0.30.
 
 The fit needs outcome data to mean anything. Without check-and-escalate (`check` events) or `POST /feedback`
 ratings, the log holds only routing decisions, and refit reports "not enough data".

@@ -26,8 +26,9 @@ func main() {
 	flag.Float64Var(&p.MinN, "min-n", p.MinN, "minimum effective sample size (weighted outcomes) before a skill is changed")
 	flag.Float64Var(&p.MinDelta, "min-delta", p.MinDelta, "minimum |fitted - seed| before a skill is changed")
 	flag.Float64Var(&p.Prior, "prior", p.Prior, "weight of the seed skill, in observations")
-	flag.Float64Var(&p.Scale, "scale", p.Scale, "logistic scale: skill margin over difficulty that moves success odds by e")
-	flag.Float64Var(&p.Target, "target", p.Target, "success rate a model is expected to have at exactly its skill level")
+	flag.Float64Var(&p.Scale, "scale", p.Scale, "logistic scale: skill difference that multiplies the odds of a good label by e (0.1: floors are ~0.15 apart)")
+	flag.Float64Var(&p.Target, "target", p.Target, "success rate at skill == difficulty; prior curvature, and the absolute level with -calibrate=false")
+	flag.BoolVar(&p.Calibrate, "calibrate", p.Calibrate, "compare labels with other models' at the same source and difficulty (false: read them as absolute success rates, which biases skills down)")
 	flag.Float64Var(&p.WCheck, "w-check", p.WCheck, "weight of an answer check (soft label p_ok)")
 	flag.Float64Var(&p.WFeedback, "w-feedback", p.WFeedback, "weight of a user feedback rating")
 	out := flag.String("write", "", "write a copy of the config with fitted skills to this path (never the config unless named)")
@@ -84,6 +85,15 @@ func run(w io.Writer, cfgPath, logPath string, days int, p Params, out string) e
 func report(w io.Writer, r *Result, p Params) {
 	fmt.Fprintf(w, "%d chat events: %d routed with signals, %d with an outcome (%d checks, %d feedback)\n\n",
 		r.Chats, r.Routed, r.Outcomes, r.Checks, r.Feedback)
+	for _, src := range srcNames {
+		if c, ok := r.Calibration[src]; ok {
+			fmt.Fprintf(w, "%-8s labels: n=%.0f, mean %.2f vs %.2f predicted by the seeds; difficulty levels: %d, %.0f%% of labels with no peer model\n",
+				src, c.N, c.MeanLabel, c.MeanSeed, c.Buckets, 100*c.Solo)
+		}
+	}
+	if len(r.Calibration) > 0 {
+		fmt.Fprintln(w)
+	}
 
 	if len(r.Fits) == 0 {
 		fmt.Fprintln(w, "no outcomes to fit: enable answer checks (check-and-escalate) and/or rate answers with POST /feedback")

@@ -15,16 +15,33 @@ import (
 
 // Params are the fitting knobs (all exposed as flags).
 type Params struct {
-	MinN      float64 // effective sample size (sum of outcome weights) needed before a skill changes
-	MinDelta  float64 // |fitted - seed| needed before a skill changes
-	Prior     float64 // weight of the seed skill, in observations
-	Scale     float64 // logistic scale τ
-	Target    float64 // success rate at difficulty == skill
+	MinN     float64 // effective sample size (sum of outcome weights) needed before a skill changes
+	MinDelta float64 // |fitted - seed| needed before a skill changes
+	Prior    float64 // weight of the seed skill, in observations
+	// Scale τ: a skill difference of τ multiplies the odds of a good label by e. 0.1 because the min_skill
+	// floors are ~0.15 apart, so being one complexity tier better is worth e^1.5 ≈ 4.5× the odds.
+	Scale float64
+	// Target: success rate at difficulty == skill, the meaning of "clears the floor" (0.8: most answers at
+	// the floor should be acceptable). It shapes the prior's curvature, and is the absolute level used with
+	// -calibrate=false.
+	Target    float64
 	WCheck    float64 // weight of an answer check (label: p_ok)
 	WFeedback float64 // weight of a user rating (label: good=1, bad=0); strongest signal
+	// Calibrate compares each label with the other models' labels at the same source and difficulty instead
+	// of with the absolute logistic, so noisy or strict labels do not drag every skill down (see Fit).
+	Calibrate bool
 }
 
-var defaultParams = Params{MinN: 20, MinDelta: 0.02, Prior: 10, Scale: 0.1, Target: 0.8, WCheck: 1, WFeedback: 2}
+var defaultParams = Params{MinN: 20, MinDelta: 0.02, Prior: 10, Scale: 0.1, Target: 0.8, WCheck: 1, WFeedback: 2, Calibrate: true}
+
+// Label sources, calibrated separately (a judge's p_ok and a user's thumbs have different scales).
+const (
+	srcCheck = iota
+	srcFeedback
+	nSrc
+)
+
+var srcNames = [nSrc]string{"check", "feedback"}
 
 // Log is what refit needs from decisions.jsonl.
 type Log struct {
@@ -100,8 +117,22 @@ func (lg *Log) add(line []byte, since time.Time) {
 	}
 }
 
-// obs is one weighted outcome of one answer: y in [0,1] at difficulty d.
-type obs struct{ d, y, w float64 }
+// obs is one weighted outcome of one answer: label y in [0,1] from source src at difficulty d. s0 is the
+// answering model's seed skill for the answer's topic mix; peer is the other models' mean label at the same
+// source and difficulty (0 when uncalibrated).
+type obs struct {
+	d, y, w, s0, peer float64
+	src               int
+}
+
+// Calibration summarises the labels of one source.
+type Calibration struct {
+	N         float64 // total label weight
+	MeanLabel float64 // weighted mean label
+	MeanSeed  float64 // weighted mean success the absolute (uncalibrated) model predicts from the seeds
+	Buckets   int     // difficulty levels seen
+	Solo      float64 // share of label weight at difficulties where only one model was seen (no peers: no signal)
+}
 
 // FitRow is the fitted skill of one model on one topic ("" = the model's default_skill).
 type FitRow struct {
@@ -118,6 +149,7 @@ type Result struct {
 	Chats, Routed, Outcomes, Checks, Feedback int
 	Fits                                      []FitRow
 	Reliability                               map[string]*Reliability
+	Calibration                               map[string]Calibration // by label source
 }
 
 // Changes returns the rows that clear -min-n and -min-delta.
@@ -140,23 +172,31 @@ func (r *Result) Changes() []FitRow {
 // `failed`) say nothing about quality: they only go to the reliability table. Other 4xx are skipped.
 // An answer counts toward every topic in proportion to the logged topic probability.
 //
-// Selection bias. The router only sends a model the prompts whose floor it clears, so a cheap model's raw
-// success rate comes from easy prompts and says little about harder ones. So each outcome is scored against
-// the difficulty it was routed at, d = min_skill[complexity] + risk_bonus[risk] (the floor, on the same
-// 0..1 scale as skills), with a one-parameter logistic (Rasch / Elo-style) model:
+// Selection bias and label scale. The router only sends a model the prompts whose floor it clears, so a
+// cheap model's raw success rate comes from easy prompts. And labels are noisy and not on an absolute
+// scale: p_ok rarely gets near 1, ratings skew to "bad". So a label is never read as an absolute success
+// rate. It is compared with the labels of the other models at the same source and difficulty,
+// d = min_skill[complexity] + risk_bonus[risk] (the floor the answer was routed against):
 //
-//	P(success | skill s, difficulty d) = σ((s - d)/Scale + logit(Target))
+//	E[label | skill s] = σ(logit(peer) + (s − seed)/Scale)
 //
-// i.e. a model is expected to succeed Target (80%) of the time on prompts exactly at its skill. Passing
-// easy prompts is then weak evidence (it was expected anyway) while failing them is strong evidence, and
-// passing hard prompts moves the skill up a lot. The seed skill from config.yaml is the prior: Prior pseudo-
-// observations of success rate Target at difficulty = seed, so with no data the fit is the seed exactly.
-// The MAP skill solves one monotone equation, found by bisection on [0,1].
+// where peer is the other models' mean label there. A model whose labels are as good as its peers' keeps
+// its seed. Labels better or worse than the peers' move it, on a logistic slope: beating peers who already
+// score 0.97 is little headroom and weak evidence, and falling behind them is strong evidence. A difficulty
+// where no other model was seen carries no signal. The absolute level of the skills therefore stays
+// anchored to the seeds, which judge labels alone cannot identify.
+//
+// With -calibrate=false the label is read as an absolute success probability instead (a Rasch/Elo-style
+// model: σ((s − d)/Scale + logit(Target))). That drags every skill down whenever labels are below ~0.95.
+//
+// The seed skill from config.yaml is the prior: Prior pseudo-observations that expect exactly Target
+// success at s = seed, so with no data the fit is the seed. The MAP skill solves one monotone equation,
+// found by bisection on [0,1].
 //
 // default_skill is fitted the same way from the outcomes on topics the model has no explicit skill for
-// (those are the topics it governs).
+// (the topics it governs), leaving out topics that get their own new skill, so no outcome is used twice.
 func Fit(cfg *config.Config, lg *Log, p Params) *Result {
-	res := &Result{Reliability: map[string]*Reliability{}}
+	res := &Result{Reliability: map[string]*Reliability{}, Calibration: map[string]Calibration{}}
 	rel := func(m string) *Reliability {
 		if res.Reliability[m] == nil {
 			res.Reliability[m] = &Reliability{}
@@ -172,8 +212,12 @@ func Fit(cfg *config.Config, lg *Log, p Params) *Result {
 		}
 	}
 
-	type key struct{ model, topic string }
-	data := map[key][]obs{}
+	type answer struct {
+		m      *config.Model
+		topics map[string]float64
+		labels []obs
+	}
+	var answers []answer
 	for _, c := range lg.Chats {
 		res.Chats++
 		for _, m := range c.Failed {
@@ -194,82 +238,172 @@ func Fit(cfg *config.Config, lg *Log, p Params) *Result {
 		if !ok2xx(c.Status) || c.ID == "" {
 			continue // availability (5xx/429) or a bad request (other 4xx): not a quality signal
 		}
+		m := cfg.Model(c.Model)
+		topics := map[string]float64{}
+		var s0, sum float64
+		for t, pt := range d.Signals.Topics {
+			if _, known := cfg.Topics[t]; known && pt > 0 {
+				topics[t] = pt
+				s0 += pt * m.Skill(t)
+				sum += pt
+			}
+		}
+		if sum == 0 {
+			continue
+		}
+		s0 /= sum
 		var labels []obs
 		diff := difficulty(cfg, d.Signals)
 		if y, ok := lg.Checks[c.ID+"\x00"+c.Model]; ok {
-			labels = append(labels, obs{diff, clamp01(y), p.WCheck})
+			labels = append(labels, obs{d: diff, y: clamp01(y), w: p.WCheck, s0: s0, src: srcCheck})
 			res.Checks++
 		}
 		if y, ok := lg.Feedback[c.ID]; ok && final[c.ID] == c.Model {
-			labels = append(labels, obs{diff, y, p.WFeedback})
+			labels = append(labels, obs{d: diff, y: y, w: p.WFeedback, s0: s0, src: srcFeedback})
 			res.Feedback++
 		}
 		if len(labels) == 0 {
 			continue
 		}
 		res.Outcomes++
-		m := cfg.Model(c.Model)
-		for t, pt := range d.Signals.Topics {
-			if _, known := cfg.Topics[t]; !known || pt <= 0 {
-				continue
+		answers = append(answers, answer{m, topics, labels})
+	}
+
+	// Peers: per (label source, difficulty), the labels of every model, to compare each model with the others.
+	type bucket struct {
+		src int
+		d   float64
+	}
+	type sums struct{ w, wy float64 }
+	all, byModel := map[bucket]sums{}, map[bucket]map[string]sums{}
+	for _, a := range answers {
+		for _, o := range a.labels {
+			k := bucket{o.src, o.d}
+			s := all[k]
+			s.w, s.wy = s.w+o.w, s.wy+o.w*o.y
+			all[k] = s
+			if byModel[k] == nil {
+				byModel[k] = map[string]sums{}
 			}
-			for _, o := range labels {
-				o.w *= pt
-				data[key{m.ID, t}] = append(data[key{m.ID, t}], o)
-				if _, explicit := m.Skills[t]; !explicit {
-					data[key{m.ID, ""}] = append(data[key{m.ID, ""}], o)
+			s = byModel[k][a.m.ID]
+			s.w, s.wy = s.w+o.w, s.wy+o.w*o.y
+			byModel[k][a.m.ID] = s
+		}
+	}
+	cal := map[int]*Calibration{}
+	for k, s := range all {
+		c := cal[k.src]
+		if c == nil {
+			c = &Calibration{}
+			cal[k.src] = c
+		}
+		c.Buckets++
+		c.N += s.w
+		c.MeanLabel += s.wy
+		if len(byModel[k]) < 2 {
+			c.Solo += s.w
+		}
+	}
+	for _, a := range answers {
+		for _, o := range a.labels {
+			cal[o.src].MeanSeed += o.w * prob(o.s0, o.d, p)
+		}
+	}
+	for src, c := range cal {
+		c.MeanLabel, c.MeanSeed, c.Solo = c.MeanLabel/c.N, c.MeanSeed/c.N, c.Solo/c.N
+		res.Calibration[srcNames[src]] = *c
+	}
+
+	type key struct{ model, topic string }
+	data := map[key][]obs{}
+	for _, a := range answers {
+		for _, o := range a.labels {
+			if p.Calibrate {
+				// Leave-one-model-out peer mean at this source and difficulty.
+				k := bucket{o.src, o.d}
+				mine, tot := byModel[k][a.m.ID], all[k]
+				if tot.w-mine.w < 1e-9 {
+					continue // no other model seen here: nothing to compare with
 				}
+				o.peer = math.Max(0.02, math.Min(0.98, (tot.wy-mine.wy)/(tot.w-mine.w)))
+			}
+			for t, pt := range a.topics {
+				o2 := o
+				o2.w *= pt
+				data[key{a.m.ID, t}] = append(data[key{a.m.ID, t}], o2)
 			}
 		}
 	}
 
-	for _, m := range cfg.Models {
-		topics := make([]string, 0, len(cfg.Topics)+1)
-		for t := range cfg.Topics {
-			topics = append(topics, t)
+	row := func(m config.Model, t string, seed float64, pts []obs) FitRow {
+		f := FitRow{Model: m.ID, Topic: t, Seed: seed, Fitted: fitSkill(pts, seed, p)}
+		var sy float64
+		for _, o := range pts {
+			f.N += o.w
+			sy += o.w * o.y
 		}
-		sort.Strings(topics)
-		for _, t := range append(topics, "") {
+		f.Success = round(sy/f.N, 1e6)
+		f.N = round(f.N, 1e6) // drop float noise from fractional topic weights
+		f.Fitted = round(f.Fitted, 100)
+		f.Change = f.N >= p.MinN && math.Abs(f.Fitted-f.Seed) >= p.MinDelta-1e-9
+		return f
+	}
+	topics := make([]string, 0, len(cfg.Topics))
+	for t := range cfg.Topics {
+		topics = append(topics, t)
+	}
+	sort.Strings(topics)
+	for _, m := range cfg.Models {
+		var implicit []obs // outcomes on topics still governed by default_skill
+		for _, t := range topics {
 			pts := data[key{m.ID, t}]
 			if len(pts) == 0 {
 				continue
 			}
-			seed := m.DefaultSkill
-			if t != "" {
-				seed = m.Skill(t)
-			}
-			f := FitRow{Model: m.ID, Topic: t, Seed: seed, Fitted: fitSkill(pts, seed, p)}
-			var sy float64
-			for _, o := range pts {
-				f.N += o.w
-				sy += o.w * o.y
-			}
-			f.Success = round(sy/f.N, 1e6)
-			f.N = round(f.N, 1e6) // drop float noise from fractional topic weights
-			f.Fitted = round(f.Fitted, 100)
-			f.Change = f.N >= p.MinN && math.Abs(f.Fitted-f.Seed) >= p.MinDelta-1e-9
+			f := row(m, t, m.Skill(t), pts)
 			res.Fits = append(res.Fits, f)
+			if _, explicit := m.Skills[t]; !explicit && !f.Change {
+				implicit = append(implicit, pts...)
+			}
+		}
+		if len(implicit) > 0 {
+			res.Fits = append(res.Fits, row(m, "", m.DefaultSkill, implicit))
 		}
 	}
 	return res
 }
 
+// prob is the absolute (uncalibrated) success probability of skill s at difficulty d:
+// σ((s − d)/Scale + logit(Target)).
+func prob(s, d float64, p Params) float64 { return sigmoid((s-d)/p.Scale + logit(p.Target)) }
+
+// expected is the label a model with skill s is expected to get on o, when its seed skill is seed. Calibrated
+// (o.peer > 0): the peers' mean label when s == seed, moving with s on the logistic's slope. Otherwise the
+// absolute prob.
+func expected(o obs, s, seed float64, p Params) float64 {
+	if o.peer > 0 {
+		return sigmoid(logit(o.peer) + (s-seed)/p.Scale)
+	}
+	return prob(s, o.d, p)
+}
+
 // fitSkill returns the MAP skill: the root of the score equation
 //
-//	Prior·(Target − P(seed)) + Σ w·(y − P(d)) = 0,   P(x) = σ((s − x)/Scale + logit(Target))
+//	Prior·(Target − σ(logit(Target) + (s − seed)/Scale)) + Σ w·(y − expected(s)) = 0
 //
 // which is strictly decreasing in s, so bisection on [0,1] finds it (clamped at the ends).
 func fitSkill(pts []obs, seed float64, p Params) float64 {
-	bias := math.Log(p.Target / (1 - p.Target))
-	prob := func(s, d float64) float64 { return 1 / (1 + math.Exp(-((s-d)/p.Scale + bias))) }
-	g := func(s float64) float64 {
-		v := p.Prior * (p.Target - prob(s, seed))
+	return bisect(0, 1, func(s float64) float64 {
+		v := p.Prior * (p.Target - sigmoid(logit(p.Target)+(s-seed)/p.Scale))
 		for _, o := range pts {
-			v += o.w * (o.y - prob(s, o.d))
+			v += o.w * (o.y - expected(o, s, seed, p))
 		}
 		return v
-	}
-	lo, hi := 0.0, 1.0
+	})
+}
+
+// bisect finds the root of a decreasing g on [lo, hi], clamped to the ends.
+func bisect(lo, hi float64, g func(float64) float64) float64 {
 	if g(lo) <= 0 {
 		return lo
 	}
@@ -286,6 +420,10 @@ func fitSkill(pts []obs, seed float64, p Params) float64 {
 	}
 	return (lo + hi) / 2
 }
+
+func sigmoid(x float64) float64 { return 1 / (1 + math.Exp(-x)) }
+
+func logit(p float64) float64 { return math.Log(p / (1 - p)) }
 
 // difficulty is the quality floor a request was routed against, without the low-confidence bump
 // (that reflects the decision model's doubt, not the prompt).
