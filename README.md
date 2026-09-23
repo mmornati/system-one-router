@@ -31,7 +31,7 @@ curl -s localhost:8787/v1/chat/completions -d '{"model":"auto","messages":[{"rol
 curl -s localhost:8787/route -d '{"messages":[{"role":"user","content":"Design a multi-region Postgres failover"}]}'   # dry run: decision only
 ```
 
-Response headers: `X-Router-Model`, `X-Router-Reason`, `X-Router-Topic`, `X-Router-Complexity`, `X-Router-Risk`, `X-Router-Failed`.
+Response headers: `X-Router-Model`, `X-Router-Reason`, `X-Router-Topic`, `X-Router-Complexity`, `X-Router-Risk`, `X-Router-Failed`, `X-Router-Request-Id`.
 
 Point clients at it with `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`. For OpenCode, add a provider with that base URL and the model `auto`.
 
@@ -109,6 +109,39 @@ internal/upstream upstream client + live price refresh
 internal/store    JSONL event log
 bench/            labelled cases (cases.json) + TypeScript Jev/LLM check
 site/             published benchmark report (GitHub Pages)
+```
+
+## Event log
+
+Every request to `/v1/chat/completions` and `/route` gets a request id (12 random bytes, hex), returned
+in `X-Router-Request-Id` and included in its logged events. Each line in `data/decisions.jsonl` is
+`{"ts", "kind", "data"}`; `kind` is one of:
+
+- `chat` — a forwarded request. `data.id`, `data.decision` (the full routing `Decision`, `null` for a
+  pass-through request naming a model directly), `data.model`, `data.failed` (models that errored before
+  this one), `data.status`, `data.cost_usd`, `data.prompt_tokens`, `data.completion_tokens`,
+  `data.reasoning_tokens`, `data.latency_ms` (upstream round trip), `data.stream`.
+- `route_dry` — a `POST /route` dry run: the `Decision` itself, including `data.id`.
+- `refused` — a request the routing policy refused (private + `local_only`, no local model): the `Decision`.
+- `shadow` — the background shadow-provider check (`decision.shadow` in config): `data.id`,
+  `data.provider`, `data.primary`/`data.shadow` signals, `data.agree_topic`, `data.agree_complexity`.
+- `feedback` — see below.
+
+The `Decision` logged with `chat`, `route_dry` and `refused` carries `state`: the state map sent to the
+decision model (`request`, `conversation_start`, `system_prompt`), kept as training data for re-fitting
+skills and fine-tuning Laya. **`state` is omitted whenever the request is flagged private** (local
+pre-check or the decision model's own `private_data` answer), so secrets never end up in the log twice —
+though note the log otherwise contains prompts and responses' cost/token metadata, not the responses
+themselves.
+
+### Feedback
+
+`POST /feedback` records a rating against a request id, as a `feedback` event (`data.id`, `data.rating`,
+`data.comment`). `rating` must be `"good"` or `"bad"`; the id isn't checked against the log.
+
+```bash
+curl -s localhost:8787/feedback -d '{"id":"<X-Router-Request-Id>","rating":"bad","comment":"picked a model too weak for this"}'
+# 204 No Content
 ```
 
 ## License

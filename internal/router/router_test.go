@@ -136,17 +136,17 @@ func TestRouteStickyAndFallback(t *testing.T) {
 	jev := &fakeProvider{name: "jev", res: jevAnswer("code-gen", 0.95, 1, 0.3)}
 	rt := New(cfg, &decision.Selector{Mode: "jev", Providers: map[string]decision.Provider{"jev": jev}})
 
-	first := rt.Route(context.Background(), Request{FirstUser: "write a csv parser", LastUser: "write a csv parser", UserTurns: 1})
+	first := rt.Route(context.Background(), Request{FirstUser: "write a csv parser", LastUser: "write a csv parser", UserTurns: 1}, "id-1")
 	if first.Model != "deepseek/deepseek-v4.1-flash" {
 		t.Fatalf("first: %+v", first)
 	}
-	next := rt.Route(context.Background(), Request{FirstUser: "write a csv parser", LastUser: "now add tests", UserTurns: 2})
+	next := rt.Route(context.Background(), Request{FirstUser: "write a csv parser", LastUser: "now add tests", UserTurns: 2}, "id-2")
 	if !next.Sticky || next.Model != first.Model || jev.calls != 1 {
 		t.Fatalf("sticky: %+v calls=%d", next, jev.calls)
 	}
 
 	jev.err = errors.New("boom")
-	fb := rt.Route(context.Background(), Request{FirstUser: "other", LastUser: "other", UserTurns: 1})
+	fb := rt.Route(context.Background(), Request{FirstUser: "other", LastUser: "other", UserTurns: 1}, "id-3")
 	if fb.Model != cfg.Routing.FallbackModel || fb.Error == "" {
 		t.Fatalf("fallback: %+v", fb)
 	}
