@@ -23,19 +23,25 @@ func New(baseURL, apiKey string) *Client {
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey, HTTP: &http.Client{}}
 }
 
+// forwarded are the only client headers passed upstream. Client credentials (Authorization, x-api-key)
+// never are: the gateway authenticates with its own key.
+var forwarded = []string{"Accept", "HTTP-Referer", "X-Title", "anthropic-version", "anthropic-beta"}
+
 // Post sends body to BaseURL+path. The caller owns the response body.
 func (c *Client) Post(ctx context.Context, path string, body []byte, hdr http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	for _, h := range []string{"Accept", "HTTP-Referer", "X-Title"} {
-		if v := hdr.Get(h); v != "" {
-			req.Header.Set(h, v)
+	for _, h := range forwarded {
+		if v := hdr.Values(h); len(v) > 0 {
+			req.Header[http.CanonicalHeaderKey(h)] = append([]string(nil), v...)
 		}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 	return c.HTTP.Do(req)
 }
 

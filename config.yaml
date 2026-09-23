@@ -42,6 +42,9 @@ routing:
     max_answer_chars: 3000
     min_complexity: 0    # only check requests at least this complex (0..3)
 
+anthropic:               # POST /v1/messages (Anthropic Messages API, forwarded to upstream /messages)
+  auto_models: []        # globs routed like "auto", e.g. ["claude-*"] for clients with hard-coded model names (Claude Code)
+
 topics:
   code-gen: Writing new code, functions, scripts, or features.
   code-review: Reviewing existing code or a diff for quality, bugs, or style.
@@ -105,5 +108,6 @@ models:
   #   price: {in: 0, out: 0}
   #   context: 32768
   #   tools: true
+  #   anthropic: false   # true if this runtime also serves the Anthropic /messages API; else skipped for /v1/messages
   #   default_skill: 0.50
   #   skills: {chat: 0.70, writing: 0.55}

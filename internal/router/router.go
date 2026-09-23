@@ -94,17 +94,19 @@ func (r *Router) signals(res *decision.Result) *Signals {
 }
 
 func (r *Router) Route(ctx context.Context, req Request, id string) *Decision {
-	needs := Needs{InputTokens: req.EstTokens(), Tools: req.Tools, Vision: req.Vision}
+	needs := Needs{InputTokens: req.EstTokens(), Tools: req.Tools, Vision: req.Vision, AnthropicAPI: req.AnthropicAPI}
 	env := Env{InFlight: r.Tracker.InFlight, SpentUSD: r.Tracker.Spent}
 	key := req.StickyKey()
 
+	privateHint := req.LooksPrivate()
 	if req.UserTurns > 1 {
-		if m, ok := r.Tracker.Sticky(key); ok {
+		// A secret that shows up mid-conversation (e.g. in a tool result) must not follow the sticky
+		// model off the machine.
+		if m, ok := r.Tracker.Sticky(key); ok && r.serves(m, needs) && !(privateHint && r.cfg.Decision.Private == "local_only" && !r.isLocal(m)) {
 			return &Decision{ID: id, Model: m, Reason: "sticky: continuing conversation", Sticky: true, Needs: needs}
 		}
 	}
 
-	privateHint := req.LooksPrivate()
 	p, err := r.sel.Pick(privateHint)
 	if err != nil {
 		if privateHint && r.cfg.Decision.Private == "local_only" {
@@ -164,10 +166,28 @@ func (r *Router) fallback(id string, needs Needs, err error) *Decision {
 		d.Error = err.Error()
 		d.Reason = "fallback: decision failed"
 	}
-	if d.Model == "" {
+	if d.Model == "" || !r.serves(d.Model, needs) {
 		d.Model = r.cfg.Models[0].ID
+		for _, m := range r.cfg.Models {
+			if r.serves(m.ID, needs) {
+				d.Model = m.ID
+				break
+			}
+		}
 	}
 	return d
+}
+
+func (r *Router) isLocal(model string) bool {
+	m := r.cfg.Model(model)
+	return m != nil && m.Local
+}
+
+// serves reports whether model can take a request with these needs' API format (models not in the
+// config are remote, so they can).
+func (r *Router) serves(model string, needs Needs) bool {
+	m := r.cfg.Model(model)
+	return m == nil || !needs.AnthropicAPI || m.ServesAnthropic()
 }
 
 // Alternatives returns the next models to try after d.Model fails upstream: other eligible candidates
@@ -180,7 +200,7 @@ func (r *Router) Alternatives(d *Decision) []string {
 			out, seen[c.ID] = append(out, c.ID), true
 		}
 	}
-	if fb := r.cfg.Routing.FallbackModel; fb != "" && !seen[fb] && !d.Needs.LocalOnly {
+	if fb := r.cfg.Routing.FallbackModel; fb != "" && !seen[fb] && !d.Needs.LocalOnly && r.serves(fb, d.Needs) {
 		out = append(out, fb)
 	}
 	return out
@@ -190,7 +210,7 @@ func (r *Router) Alternatives(d *Decision) []string {
 func (r *Router) localOnly(id string, needs Needs, err error) *Decision {
 	needs.LocalOnly = true
 	for _, m := range r.cfg.Models {
-		if m.Local {
+		if m.Local && r.serves(m.ID, needs) {
 			return &Decision{ID: id, Model: m.ID, Reason: "private request: first local model (no local decision provider)", Needs: needs, Error: err.Error()}
 		}
 	}
