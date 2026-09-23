@@ -201,6 +201,8 @@ each time it's called, so it always reflects the current log.
 
 ![Router dashboard](docs/dashboard.png)
 
+*Captured from a real run (2026-09-23, 18 requests, $0.10). Jev was slow during this run: 9 decisions hit the 3 s `timeout` and went to `fallback_model` (Sonnet), which is why fallback dominates the routing reasons.*
+
 ## Event log
 
 Every request to `/v1/chat/completions`, `/v1/messages` and `/route` gets a request id (12 random bytes, hex), returned
