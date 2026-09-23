@@ -56,7 +56,17 @@ type Routing struct {
 	// ReasoningEffort by complexity (e.g. [low, low, medium, high]); applied only when the client sets none.
 	ReasoningEffort []string `yaml:"reasoning_effort"`
 	// Retries: on 429/5xx from upstream, try the next-best candidate this many times.
-	Retries int `yaml:"retries"`
+	Retries int   `yaml:"retries"`
+	Check   Check `yaml:"check"`
+}
+
+// Check asks the decision model whether a non-streaming answer is good enough, and re-sends the
+// request to a stronger model when it is not.
+type Check struct {
+	Enabled        bool    `yaml:"enabled"`
+	Threshold      float64 `yaml:"threshold"`        // P(answer ok) below this escalates
+	MaxAnswerChars int     `yaml:"max_answer_chars"` // answer trimmed to this in the decision state
+	MinComplexity  int     `yaml:"min_complexity"`   // only check requests at least this complex
 }
 
 type Model struct {
@@ -138,6 +148,12 @@ func (c *Config) defaults() {
 		if c.Models[i].OutputMultiplier == 0 {
 			c.Models[i].OutputMultiplier = 1
 		}
+	}
+	if c.Routing.Check.Threshold == 0 {
+		c.Routing.Check.Threshold = 0.5
+	}
+	if c.Routing.Check.MaxAnswerChars == 0 {
+		c.Routing.Check.MaxAnswerChars = 3000
 	}
 	if c.Routing.StickyTTL == 0 {
 		c.Routing.StickyTTL = 2 * time.Hour

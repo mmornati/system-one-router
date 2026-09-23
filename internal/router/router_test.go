@@ -167,3 +167,80 @@ func TestSelector(t *testing.T) {
 		t.Fatal("local_only without local provider must fail")
 	}
 }
+
+func TestEscalationTarget(t *testing.T) {
+	cfg := testConfig(t)
+	rt := New(cfg, &decision.Selector{})
+	d := &Decision{Candidates: []Candidate{
+		{ID: "anthropic/claude-opus-5.5", Skill: 0.95, EstCost: 0.1, Why: "no vision"},
+		{ID: "anthropic/claude-sonnet-5", Skill: 0.85, EstCost: 0.05, Eligible: true},
+		{ID: "openai/gpt-5.6-luna", Skill: 0.80, EstCost: 0.01, Why: "below quality floor"},
+		{ID: "deepseek/deepseek-v4.1-flash", Skill: 0.53, EstCost: 0.001, Eligible: true},
+		{ID: "qwen/qwen3.7-flash", Skill: 0.50, EstCost: 0.0005, Eligible: true},
+	}}
+	cases := []struct {
+		name, current string
+		exclude       []string
+		want          string
+	}{
+		{"cheapest clearly stronger, floor ignored", "qwen/qwen3.7-flash", nil, "openai/gpt-5.6-luna"},
+		{"excluded models skipped", "qwen/qwen3.7-flash", []string{"openai/gpt-5.6-luna"}, "anthropic/claude-sonnet-5"},
+		{"incapable model never picked", "anthropic/claude-sonnet-5", nil, ""},
+		{"unknown current model", "nope", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := rt.EscalationTarget(d, c.current, c.exclude); got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	// Nothing clears the margin: the most skilled stronger model still beats staying put.
+	small := &Decision{Candidates: d.Candidates[3:]}
+	if got := rt.EscalationTarget(small, "qwen/qwen3.7-flash", nil); got != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("within margin: got %q", got)
+	}
+	// Private + local_only: no local model to escalate to.
+	local := &Decision{Candidates: d.Candidates, Needs: Needs{LocalOnly: true}}
+	if got := rt.EscalationTarget(local, "qwen/qwen3.7-flash", nil); got != "" {
+		t.Fatalf("local only: got %q", got)
+	}
+	// Budget exhausted since routing.
+	opus := &Decision{Candidates: []Candidate{{ID: "anthropic/claude-sonnet-5", Skill: 0.85, Eligible: true}, {ID: "anthropic/claude-opus-5.5", Skill: 0.95, Eligible: true}}}
+	rt.Tracker.AddSpend("anthropic/claude-opus-5.5", 100)
+	if got := rt.EscalationTarget(opus, "anthropic/claude-sonnet-5", nil); got != "" {
+		t.Fatalf("budget: got %q", got)
+	}
+}
+
+func TestCheckState(t *testing.T) {
+	rt := New(testConfig(t), &decision.Selector{})
+	st := rt.checkState(Request{System: strings.Repeat("s", 9000), LastUser: strings.Repeat("r", 9000)}, strings.Repeat("a", 9000), 6000)
+	total := 0
+	for _, v := range st {
+		total += len(v)
+	}
+	if total > 6100 || len(st["answer"]) > 3100 || len(st["request"]) < 1500 || st["system_prompt"] == "" {
+		t.Fatalf("state split: answer=%d request=%d system=%d", len(st["answer"]), len(st["request"]), len(st["system_prompt"]))
+	}
+	short := rt.checkState(Request{LastUser: "hi"}, strings.Repeat("a", 9000), 1500)
+	if len(short["answer"]) < 1400 || short["request"] != "hi" {
+		t.Fatalf("short request should leave the budget to the answer: %d", len(short["answer"]))
+	}
+}
+
+func TestCheckPrivacy(t *testing.T) {
+	jev := &fakeProvider{name: "jev", res: &decision.Result{Answers: map[string]decision.Answer{"answer_ok": {Noul: 0.3}}}}
+	cfg := testConfig(t)
+	cfg.Decision.Private = "local_only"
+	rt := New(cfg, &decision.Selector{Mode: "jev", PrivatePolicy: "local_only", Providers: map[string]decision.Provider{"jev": jev}})
+	d := &Decision{Signals: &Signals{Private: true}}
+	if _, _, _, _, err := rt.Check(context.Background(), Request{LastUser: "x"}, "y", d); !errors.Is(err, ErrCheckSkipped) || jev.calls != 0 {
+		t.Fatalf("private request checked remotely: err=%v calls=%d", err, jev.calls)
+	}
+	d.Signals.Private = false
+	if p, _, _, prov, err := rt.Check(context.Background(), Request{LastUser: "x"}, "y", d); err != nil || p != 0.3 || prov != "jev" {
+		t.Fatalf("public check: p=%v prov=%q err=%v", p, prov, err)
+	}
+}

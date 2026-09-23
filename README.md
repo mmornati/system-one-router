@@ -14,8 +14,9 @@ An OpenAI-compatible gateway that picks the model for each task. Send `model: "a
    - quality floor = `min_skill[complexity] + risk_bonus[risk]`, raised one level when the decision model's confidence is low;
    - the cheapest model that clears the floor wins; the cost estimate includes an in-flight load penalty and daily budgets.
 4. **Forward** to the chosen model, streaming or not. On a 429 or 5xx it tries the next candidates, and it sets `reasoning.effort` from the complexity.
-5. **Keep the model** for the rest of the conversation. Switching models mid-conversation throws away the prompt cache.
-6. **Log** every decision and its cost to `data/decisions.jsonl`, for re-fitting the skills and for fine-tuning Laya later.
+5. **Check the answer** (optional, non-streaming only): one yes/no question to the decision model, "does the answer fully and correctly address the request?". If not, the request goes once to a stronger model and the client gets that answer instead.
+6. **Keep the model** for the rest of the conversation. Switching models mid-conversation throws away the prompt cache.
+7. **Log** every decision and its cost to `data/decisions.jsonl`, for re-fitting the skills and for fine-tuning Laya later.
 
 Requests naming any other model are passed through unchanged.
 
@@ -31,7 +32,7 @@ curl -s localhost:8787/v1/chat/completions -d '{"model":"auto","messages":[{"rol
 curl -s localhost:8787/route -d '{"messages":[{"role":"user","content":"Design a multi-region Postgres failover"}]}'   # dry run: decision only
 ```
 
-Response headers: `X-Router-Model`, `X-Router-Reason`, `X-Router-Topic`, `X-Router-Complexity`, `X-Router-Risk`, `X-Router-Failed`, `X-Router-Request-Id`.
+Response headers: `X-Router-Model`, `X-Router-Reason`, `X-Router-Topic`, `X-Router-Complexity`, `X-Router-Risk`, `X-Router-Failed`, `X-Router-Request-Id`, and with the answer check on, `X-Router-Checked` (P(answer ok), 2 decimals) and `X-Router-Escalated` (`<from>-><to>`). `X-Router-Model` is always the model that wrote the returned answer.
 
 Point clients at it with `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`. For OpenCode, add a provider with that base URL and the model `auto`.
 
@@ -119,6 +120,33 @@ sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps] [--
 
 Any local service that accepts `POST {model, state, questions}` and returns `{answers, usage}` works unchanged; see the Laya sidecar above. Laya's English checkpoint sees only 512 tokens, so set `max_state_chars` to about 1500.
 
+## Check and escalate
+
+With `routing.check.enabled: true`, a routed (`model: "auto"`) non-streaming answer is shown to the
+decision model with one yes/no question: does it fully and correctly address the request? If
+P(yes) < `threshold` (default 0.5), the request is re-sent once to a stronger model: the cheapest capable
+candidate at least 0.05 more skilled than the first one (the quality floor is ignored here; context,
+tools, vision, privacy and budget limits are not), else the most skilled one. The conversation then sticks
+to that model. If the second call fails, the client gets the first answer.
+
+```yaml
+routing:
+  check:
+    enabled: true
+    threshold: 0.5          # P(answer ok) below this escalates
+    max_answer_chars: 3000  # answer trimmed to this (and to the provider's max_state_chars) in the state
+    min_complexity: 0       # only check requests at least this complex (0..3)
+```
+
+It is skipped for streaming requests, sticky follow-ups, fallback routes, tool-call turns, empty answers,
+non-200 responses, and when the model used is already the strongest capable one. Streaming is excluded
+because the client already has the answer by the time it can be judged. The check uses the same
+provider choice as routing, so a private request goes to the local provider when routing would use it,
+and is not checked at all under `private: local_only` without one.
+
+Cost: one extra decision call per checked answer (about $0.00004 with Jev, ~300 ms), plus a second model
+call for the answers that fail.
+
 ## Layout
 
 ```
@@ -145,7 +173,11 @@ in `X-Router-Request-Id` and included in its logged events. Each line in `data/d
 - `chat` — a forwarded request. `data.id`, `data.decision` (the full routing `Decision`, `null` for a
   pass-through request naming a model directly), `data.model`, `data.failed` (models that errored before
   this one), `data.status`, `data.cost_usd`, `data.prompt_tokens`, `data.completion_tokens`,
-  `data.reasoning_tokens`, `data.latency_ms` (upstream round trip), `data.stream`.
+  `data.reasoning_tokens`, `data.latency_ms` (upstream round trip), `data.stream`. An escalated request
+  logs a second `chat` event with the same id and `data.escalated_from`.
+- `check` — the answer check (see [Check and escalate](#check-and-escalate)): `data.id`, `data.model`
+  (the model checked), `data.p_ok`, `data.passed`, `data.escalated_to` (`""` if none), `data.check_cost_usd`,
+  `data.check_ms`, `data.provider`; or `data.id`, `data.model`, `data.error` when the check call failed.
 - `route_dry` — a `POST /route` dry run: the `Decision` itself, including `data.id`.
 - `refused` — a request the routing policy refused (private + `local_only`, no local model): the `Decision`.
 - `shadow` — the background shadow-provider check (`decision.shadow` in config): `data.id`,
@@ -218,7 +250,7 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 ## Roadmap
 
 - [ ] Re-fit model skills from logged outcomes (retries, check failures, user feedback).
-- [ ] Check-and-escalate for non-streaming or background requests (a Jev yes/no on the answer).
+- [x] Check-and-escalate for non-streaming or background requests (a Jev yes/no on the answer).
 - [x] Laya sidecar (Python, MPS).
 - [x] Optional fixed-length padding for Laya inputs (`--pad-buckets`, off by default: measured no steady-state latency gain on torch 2.14 / macOS 26 MPS; opt in and re-measure on other hardware).
 - [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first).
