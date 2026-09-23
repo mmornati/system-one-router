@@ -23,6 +23,8 @@ type Needs struct {
 	Tools       bool `json:"tools"`
 	Vision      bool `json:"vision"`
 	LocalOnly   bool `json:"local_only"`
+	// AnthropicAPI: the request is in Anthropic Messages format and is forwarded as-is to /messages.
+	AnthropicAPI bool `json:"anthropic_api,omitempty"`
 }
 
 type Candidate struct {
@@ -75,6 +77,8 @@ func Score(cfg *config.Config, sig Signals, needs Needs, env Env) (best *Candida
 			c.Why = "no tool calling"
 		case needs.Vision && !m.Vision:
 			c.Why = "no vision"
+		case needs.AnthropicAPI && !m.ServesAnthropic():
+			c.Why = "no Anthropic API"
 		case needs.LocalOnly && !m.Local:
 			c.Why = "private request, model not local"
 		case m.DailyBudgetUSD > 0 && env.SpentUSD != nil && env.SpentUSD(m.ID) >= m.DailyBudgetUSD:

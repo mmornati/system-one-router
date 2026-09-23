@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -12,13 +13,21 @@ import (
 )
 
 type Config struct {
-	Listen   string            `yaml:"listen"`
-	LogPath  string            `yaml:"log_path"`
-	Upstream Upstream          `yaml:"upstream"`
-	Decision Decision          `yaml:"decision"`
-	Routing  Routing           `yaml:"routing"`
-	Topics   map[string]string `yaml:"topics"`
-	Models   []Model           `yaml:"models"`
+	Listen    string            `yaml:"listen"`
+	LogPath   string            `yaml:"log_path"`
+	Upstream  Upstream          `yaml:"upstream"`
+	Decision  Decision          `yaml:"decision"`
+	Routing   Routing           `yaml:"routing"`
+	Topics    map[string]string `yaml:"topics"`
+	Models    []Model           `yaml:"models"`
+	Anthropic Anthropic         `yaml:"anthropic"`
+}
+
+// Anthropic configures the Anthropic Messages API endpoint (POST /v1/messages).
+type Anthropic struct {
+	// AutoModels are glob patterns (path.Match) of model names routed like "auto", e.g. ["claude-*"]
+	// so clients with hard-coded model names (Claude Code) get routed too.
+	AutoModels []string `yaml:"auto_models"`
 }
 
 type Upstream struct {
@@ -81,6 +90,9 @@ type Model struct {
 	DefaultSkill   float64            `yaml:"default_skill"`
 	Skills         map[string]float64 `yaml:"skills"` // per-topic affinity 0..1
 	DailyBudgetUSD float64            `yaml:"daily_budget_usd"`
+	// Anthropic marks a model with its own base_url as serving the Anthropic Messages API (/messages).
+	// Models without base_url go through upstream.base_url (OpenRouter), which serves it for every model.
+	Anthropic bool `yaml:"anthropic"`
 	// OutputMultiplier scales expected output tokens for cost estimates (reasoning models think out loud).
 	OutputMultiplier float64 `yaml:"output_multiplier"`
 }
@@ -96,6 +108,9 @@ func (m Model) Skill(topic string) float64 {
 	}
 	return m.DefaultSkill
 }
+
+// ServesAnthropic reports whether the model can take Anthropic Messages API requests.
+func (m Model) ServesAnthropic() bool { return m.BaseURL == "" || m.Anthropic }
 
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -170,6 +185,11 @@ func (c *Config) validate() error {
 	if c.Decision.Provider != "auto" {
 		if _, ok := c.Decision.Providers[c.Decision.Provider]; !ok {
 			return fmt.Errorf("decision provider %q not defined", c.Decision.Provider)
+		}
+	}
+	for _, p := range c.Anthropic.AutoModels {
+		if _, err := path.Match(p, ""); err != nil {
+			return fmt.Errorf("anthropic.auto_models: bad pattern %q", p)
 		}
 	}
 	for _, m := range c.Models {

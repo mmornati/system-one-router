@@ -247,3 +247,38 @@ func TestCheckPrivacy(t *testing.T) {
 		t.Fatalf("public check: p=%v prov=%q err=%v", p, prov, err)
 	}
 }
+
+func TestAnthropicAPINeedsExcludeLocalRuntimes(t *testing.T) {
+	cfg := testConfig(t)
+	local := config.Model{ID: "local/tiny", BaseURL: "http://127.0.0.1:11434/v1", Local: true, Context: 32768, Tools: true,
+		DefaultSkill: 0.9, OutputMultiplier: 1}
+	cfg.Models = append([]config.Model{local}, cfg.Models...)
+	cfg.Decision.Private = "local_only"
+	laya := &fakeProvider{name: "laya", local: true, res: jevAnswer("chat", 0.95, 0, 0)}
+	rt := New(cfg, &decision.Selector{Mode: "laya", Providers: map[string]decision.Provider{"laya": laya}})
+	ctx := context.Background()
+
+	if d := rt.Route(ctx, Request{FirstUser: "hi", LastUser: "hi", UserTurns: 1}, "a"); d.Model != "local/tiny" {
+		t.Fatalf("chat API should use the free local model: %+v", d)
+	}
+	// Same conversation over the Anthropic API: the sticky local model can't serve it.
+	d := rt.Route(ctx, Request{FirstUser: "hi", LastUser: "more", UserTurns: 2, AnthropicAPI: true}, "b")
+	if d.Sticky || d.Model == "local/tiny" || !d.Needs.AnthropicAPI {
+		t.Fatalf("anthropic request routed to local runtime: %+v", d)
+	}
+	for _, c := range d.Candidates {
+		if c.ID == "local/tiny" && c.Why != "no Anthropic API" {
+			t.Fatalf("local candidate: %+v", c)
+		}
+	}
+
+	// Private + local_only: no Anthropic-capable local model means refused; flagging it fixes that.
+	secret := Request{FirstUser: "password: hunter2", LastUser: "password: hunter2", UserTurns: 1, AnthropicAPI: true}
+	if d := rt.Route(ctx, secret, "c"); !d.Refused {
+		t.Fatalf("private anthropic request not refused: %+v", d)
+	}
+	cfg.Models[0].Anthropic = true
+	if d := rt.Route(ctx, secret, "d"); d.Refused || d.Model != "local/tiny" {
+		t.Fatalf("anthropic-capable local model not used: %+v", d)
+	}
+}

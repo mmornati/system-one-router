@@ -5,7 +5,7 @@
 
 A fast "System One" decision model ([Jev](https://openrouter.ai/docs/guides/community/jev) or a local [Laya](https://huggingface.co/convaiinnovations/laya)) decides which "System Two" LLM should answer each prompt. It is the successor of [ai-dispatch](https://github.com/mmornati/ai-dispatch).
 
-An OpenAI-compatible gateway that picks the model for each task. Send `model: "auto"` and it will:
+An OpenAI- and Anthropic-compatible gateway that picks the model for each task (`/v1/chat/completions` and `/v1/messages`, so Claude Code works too). Send `model: "auto"` and it will:
 
 1. **Pre-check** the request locally: secrets/PII regexes, tools, images, size.
 2. **Ask a decision model**, [Jev](https://openrouter.ai/docs/guides/community/jev) on OpenRouter or a local Laya helper, four typed questions in one call: main topic (with probabilities), complexity 0–3, risk 0–2, and private data yes/no.
@@ -13,7 +13,7 @@ An OpenAI-compatible gateway that picks the model for each task. Send `model: "a
    - skill = Σ P(topic) × the model's affinity for that topic;
    - quality floor = `min_skill[complexity] + risk_bonus[risk]`, raised one level when the decision model's confidence is low;
    - the cheapest model that clears the floor wins; the cost estimate includes an in-flight load penalty and daily budgets.
-4. **Forward** to the chosen model, streaming or not. On a 429 or 5xx it tries the next candidates, and it sets `reasoning.effort` from the complexity.
+4. **Forward** to the chosen model, streaming or not. On a 429 or 5xx it tries the next candidates, and on the chat endpoint it sets `reasoning.effort` from the complexity.
 5. **Check the answer** (optional, non-streaming only): one yes/no question to the decision model, "does the answer fully and correctly address the request?". If not, the request goes once to a stronger model and the client gets that answer instead.
 6. **Keep the model** for the rest of the conversation. Switching models mid-conversation throws away the prompt cache.
 7. **Log** every decision and its cost to `data/decisions.jsonl`, for re-fitting the skills and for fine-tuning Laya later.
@@ -29,6 +29,7 @@ go run ./cmd/gateway            # listens on 127.0.0.1:8787
 
 ```bash
 curl -s localhost:8787/v1/chat/completions -d '{"model":"auto","messages":[{"role":"user","content":"hi"}]}' -D - 
+curl -s localhost:8787/v1/messages -H 'anthropic-version: 2023-06-01' -d '{"model":"auto","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}' -D -
 curl -s localhost:8787/route -d '{"messages":[{"role":"user","content":"Design a multi-region Postgres failover"}]}'   # dry run: decision only
 ```
 
@@ -36,7 +37,56 @@ Response headers: `X-Router-Model`, `X-Router-Reason`, `X-Router-Topic`, `X-Rout
 
 Point clients at it with `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`. For OpenCode, add a provider with that base URL and the model `auto`.
 
-Other endpoints: `GET /v1/models`, `GET /stats?days=N` (aggregated stats as JSON; `days=0` is all time), `GET /dashboard` (a dashboard over those stats), `POST /feedback`, `GET /healthz`.
+Other endpoints: `GET /v1/models` (Anthropic shape when the request has an `anthropic-version` header), `POST /v1/messages/count_tokens`, `GET /stats?days=N` (aggregated stats as JSON; `days=0` is all time), `GET /dashboard` (a dashboard over those stats), `POST /feedback`, `GET /healthz`.
+
+### Claude Code
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_AUTH_TOKEN=dummy \
+ANTHROPIC_MODEL=auto ANTHROPIC_SMALL_FAST_MODEL=auto claude
+```
+
+The token is not checked and never forwarded (the gateway uses its own OpenRouter key). Claude Code warns that
+`auto` is not in its model catalog and assumes a 200k context window; set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` if
+the models you route to accept more. Instead of setting the model names, you can route Claude Code's own model
+names with `anthropic.auto_models: ["claude-*"]` (see below). Claude Code sends ~17k tokens of tool definitions
+on every call, so every candidate needs `tools: true`, and a routed request never goes below that input size.
+
+## Anthropic Messages API
+
+`POST /v1/messages` takes the Anthropic Messages format (system as a string or blocks; text, image, tool_use,
+tool_result and thinking blocks; tools; streaming) and forwards it unchanged, apart from `model`, to the upstream's
+`/messages` endpoint. OpenRouter serves that endpoint for every model, not only Anthropic ones (checked live with
+`qwen/qwen3.7-flash`, `deepseek/deepseek-v4.1-flash` and `openai/gpt-5.6-luna`), and reports `cost` in its usage.
+Routing, retries, sticky conversations, budgets, response headers and metering are the same as for chat
+completions; logged `chat` events carry `data.api: "anthropic"`.
+
+- **Routed models:** `auto`, `router/auto`, an empty model, or a name matching one of `anthropic.auto_models`
+  (globs). Any other model name is passed through unchanged, so it must be a valid upstream id
+  (e.g. `anthropic/claude-sonnet-5`, not `claude-sonnet-5`).
+  ```yaml
+  anthropic:
+    auto_models: ["claude-*"]   # default []: route Claude Code's hard-coded model names
+  ```
+  The trade-off: once a pattern matches, the client can no longer pick that model itself; everything matching is
+  routed, including Claude Code's background calls (titles, summaries), which usually end up on the cheapest model.
+- **What the router sees:** the system prompt; user turns are the text blocks of user messages. Tool results also
+  come in user-role messages: they count as turns (so an agent's tool loop stays on its sticky model and is not
+  re-decided on every step) and in the input size, but not as the user's words. Image blocks (also inside tool
+  results) require a vision model.
+- **Local runtimes:** a model with its own `base_url` is skipped for `/v1/messages` (candidate reason
+  `no Anthropic API`) unless it has `anthropic: true`, meaning the runtime serves `/messages` itself. There is no
+  Anthropic-to-OpenAI translation, so a private request under `private: local_only` with no such local model gets 422.
+- **Thinking:** unlike the chat endpoint's `reasoning.effort`, the gateway never adds `thinking`, since it constrains
+  `max_tokens` and `temperature`. The client's own settings are passed through.
+- **Answer check:** works for non-streaming requests. The answer is the concatenated text blocks, and turns that
+  end in `tool_use` are not checked.
+- **`count_tokens`:** OpenRouter does not serve it (404), so `POST /v1/messages/count_tokens` returns a local
+  estimate, `{"input_tokens": chars/4}`, without calling anything.
+- **Headers:** client credentials (`Authorization`, `x-api-key`) are never forwarded, on either endpoint. Only
+  `Accept`, `HTTP-Referer`, `X-Title`, `anthropic-version` and `anthropic-beta` are.
+- **Metering:** prompt tokens are `input_tokens` plus cache reads and writes. For streams, usage is read from the
+  `message_start` and `message_delta` events.
 
 ## Dashboard
 
@@ -160,7 +210,7 @@ cmd/mcp           MCP server exposing route / delegate / feedback to agents
 sidecar/          local Laya server (Decisions API shape)
 internal/decision Decisions API client + provider selection (jev / laya / auto)
 internal/router   request summary, privacy pre-check, scoring, answer check, sticky/load/budget state
-internal/gateway  OpenAI-compatible handlers, retry, streaming + cost metering, dashboard/stats
+internal/gateway  OpenAI + Anthropic Messages handlers, retry, streaming + cost metering, dashboard/stats
 internal/upstream upstream client + live price refresh
 internal/store    JSONL event log
 internal/stats    aggregates decisions.jsonl for the dashboard
@@ -170,14 +220,15 @@ site/             published benchmark report (GitHub Pages)
 
 ## Event log
 
-Every request to `/v1/chat/completions` and `/route` gets a request id (12 random bytes, hex), returned
+Every request to `/v1/chat/completions`, `/v1/messages` and `/route` gets a request id (12 random bytes, hex), returned
 in `X-Router-Request-Id` and included in its logged events. Each line in `data/decisions.jsonl` is
 `{"ts", "kind", "data"}`; `kind` is one of:
 
 - `chat` — a forwarded request. `data.id`, `data.decision` (the full routing `Decision`, `null` for a
   pass-through request naming a model directly), `data.model`, `data.failed` (models that errored before
   this one), `data.status`, `data.cost_usd`, `data.prompt_tokens`, `data.completion_tokens`,
-  `data.reasoning_tokens`, `data.latency_ms` (upstream round trip), `data.stream`. An escalated request
+  `data.reasoning_tokens`, `data.latency_ms` (upstream round trip), `data.stream`, and `data.api: "anthropic"`
+  for `/v1/messages` requests (absent for chat completions). An escalated request
   logs a second `chat` event with the same id and `data.escalated_from`.
 - `check` — the answer check (see [Check and escalate](#check-and-escalate)): `data.id`, `data.model`
   (the model checked), `data.p_ok`, `data.passed`, `data.escalated_to` (`""` if none), `data.check_cost_usd`,
@@ -258,6 +309,6 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 - [x] Laya sidecar (Python, MPS).
 - [x] Optional fixed-length padding for Laya inputs (`--pad-buckets`, off by default: measured no steady-state latency gain on torch 2.14 / macOS 26 MPS; opt in and re-measure on other hardware).
 - [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first).
-- [ ] Anthropic Messages API endpoint, so Claude Code-style clients can use the gateway.
+- [x] Anthropic Messages API endpoint, so Claude Code-style clients can use the gateway.
 - [x] MCP server exposing `route` / `delegate` to agents.
 - [x] Dashboard over `decisions.jsonl` (cost per model, agreement, escalations).

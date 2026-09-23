@@ -1,5 +1,6 @@
-// Package gateway exposes an OpenAI-compatible API. Requests with model "auto" are routed;
-// any other model name is passed through untouched, so clients can point at the gateway blindly.
+// Package gateway exposes an OpenAI-compatible API and an Anthropic Messages API. Requests with model
+// "auto" are routed; any other model name is passed through untouched, so clients can point at the
+// gateway blindly.
 package gateway
 
 import (
@@ -51,6 +52,8 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.chat)
+	mux.HandleFunc("POST /v1/messages", s.messages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.countTokens)
 	mux.HandleFunc("POST /route", s.route)
 	mux.HandleFunc("POST /feedback", s.feedback)
 	mux.HandleFunc("GET /v1/models", s.models)
@@ -135,29 +138,48 @@ func (s *Server) feedback(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// dialect is one client-facing API: where requests go upstream and how their bodies are read.
+type dialect struct {
+	name   string                                 // logged as data.api; "" for the OpenAI API
+	path   string                                 // upstream path
+	openAI bool                                   // set reasoning.effort and usage.include
+	usage  func([]byte) usage                     // usage from a response body or one SSE data payload
+	text   func([]byte) (string, bool)            // answer text, and whether it is worth checking
+	error  func(http.ResponseWriter, int, string) // error body in this API's shape
+}
+
+var openAIDialect = &dialect{path: "/chat/completions", openAI: true, usage: extractUsage, text: assistantText, error: httpError}
+
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	body, req, err := readChat(r)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	model, _ := body["model"].(string)
+	s.serve(w, r, openAIDialect, body, req, isAuto(model))
+}
+
+// serve routes the request when auto is set (else passes body["model"] through), then forwards it with
+// retries, meters it and, for non-streaming routed answers, checks it.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, dl *dialect, body map[string]any, req router.Request, auto bool) {
 	id := genID()
 	w.Header().Set("X-Router-Request-Id", id)
 	model, _ := body["model"].(string)
 	attempts := []string{model}
 	var d *router.Decision
-	if isAuto(model) {
+	if auto {
 		d = s.Router.Route(r.Context(), req, id)
 		if d.Refused {
 			s.Log.Write("refused", d)
-			httpError(w, http.StatusUnprocessableEntity, "request refused by routing policy: "+d.Reason)
+			dl.error(w, http.StatusUnprocessableEntity, "request refused by routing policy: "+d.Reason)
 			return
 		}
 		attempts = []string{d.Model}
 		if alt := s.Router.Alternatives(d); len(alt) > 0 {
 			attempts = append(attempts, alt[:min(len(alt), s.Cfg.Routing.Retries)]...)
 		}
-		if _, set := body["reasoning"]; !set && d.Signals != nil && len(s.Cfg.Routing.ReasoningEffort) > 0 {
+		if _, set := body["reasoning"]; dl.openAI && !set && d.Signals != nil && len(s.Cfg.Routing.ReasoningEffort) > 0 {
 			efforts := s.Cfg.Routing.ReasoningEffort
 			body["reasoning"] = map[string]any{"effort": efforts[min(d.Signals.Complexity, len(efforts)-1)]}
 		}
@@ -168,7 +190,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Router-Risk", strconv.Itoa(d.Signals.Risk))
 		}
 	}
-	body["usage"] = map[string]any{"include": true} // ask OpenRouter to report cost
+	if dl.openAI {
+		body["usage"] = map[string]any{"include": true} // ask OpenRouter to report cost
+	}
 
 	stream := body["stream"] == true
 	var failed []string
@@ -177,7 +201,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		payload, _ := json.Marshal(body)
 		release := s.Router.Tracker.Acquire(m)
 		start := time.Now()
-		res, err := s.Upstream(m).Post(r.Context(), "/chat/completions", payload, r.Header)
+		res, err := s.Upstream(m).Post(r.Context(), dl.path, payload, r.Header)
 		retryable := err != nil || res.StatusCode == http.StatusTooManyRequests || res.StatusCode >= 500
 		if retryable && i < len(attempts)-1 {
 			status := 0
@@ -192,30 +216,30 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			release()
-			httpError(w, http.StatusBadGateway, err.Error())
+			dl.error(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		if stream || isSSE(res) {
-			s.forward(w, res, m, d, id, failed, stream, time.Since(start))
+			s.forward(w, res, dl, m, d, id, failed, stream, time.Since(start))
 			release()
 			return
 		}
-		a := readAnswer(res, m, start)
+		a := readAnswer(res, dl, m, start)
 		release()
 		s.logChat(id, d, a, failed, false, "")
-		writeAnswer(w, s.checkAndEscalate(r, body, req, d, id, a, failed), d, failed)
+		writeAnswer(w, s.checkAndEscalate(r, dl, body, req, d, id, a, failed), d, failed)
 		return
 	}
 }
 
 // forward relays a streaming response to the client as it arrives (it cannot be checked: the client
 // already has the answer by the time it is complete).
-func (s *Server) forward(w http.ResponseWriter, res *http.Response, model string, d *router.Decision, id string, failed []string, stream bool, latency time.Duration) {
+func (s *Server) forward(w http.ResponseWriter, res *http.Response, dl *dialect, model string, d *router.Decision, id string, failed []string, stream bool, latency time.Duration) {
 	defer res.Body.Close()
 	setHeaders(w, res.Header, model, d, failed)
 	w.WriteHeader(res.StatusCode)
-	u := copyAndMeter(w, res.Body, isSSE(res))
-	s.logChat(id, d, &answer{model: model, status: res.StatusCode, usage: u, latency: latency}, failed, stream, "")
+	u := copyAndMeter(w, res.Body, isSSE(res), dl.usage)
+	s.logChat(id, d, &answer{api: dl.name, model: model, status: res.StatusCode, usage: u, latency: latency}, failed, stream, "")
 	if res.StatusCode >= 400 {
 		slog.Warn("upstream error", "model", model, "status", res.StatusCode)
 	}
@@ -223,6 +247,7 @@ func (s *Server) forward(w http.ResponseWriter, res *http.Response, model string
 
 // answer is a buffered non-streaming upstream response.
 type answer struct {
+	api     string // dialect name
 	model   string
 	status  int
 	header  http.Header
@@ -235,10 +260,10 @@ func isSSE(res *http.Response) bool {
 	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
 }
 
-func readAnswer(res *http.Response, model string, start time.Time) *answer {
+func readAnswer(res *http.Response, dl *dialect, model string, start time.Time) *answer {
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
-	return &answer{model: model, status: res.StatusCode, header: res.Header, body: b, usage: extractUsage(b), latency: time.Since(start)}
+	return &answer{api: dl.name, model: model, status: res.StatusCode, header: res.Header, body: b, usage: dl.usage(b), latency: time.Since(start)}
 }
 
 func writeAnswer(w http.ResponseWriter, a *answer, d *router.Decision, failed []string) {
@@ -282,19 +307,22 @@ func (s *Server) logChat(id string, d *router.Decision, a *answer, failed []stri
 	if escalatedFrom != "" {
 		ev["escalated_from"] = escalatedFrom
 	}
+	if a.api != "" {
+		ev["api"] = a.api
+	}
 	s.Log.Write("chat", ev)
 }
 
 // checkAndEscalate asks the decision model whether a is a good enough answer and, when it is not,
 // re-sends the request once to a stronger model. It returns the answer to give the client: a itself
 // unless the escalated call succeeded.
-func (s *Server) checkAndEscalate(r *http.Request, body map[string]any, req router.Request, d *router.Decision, id string, a *answer, failed []string) *answer {
+func (s *Server) checkAndEscalate(r *http.Request, dl *dialect, body map[string]any, req router.Request, d *router.Decision, id string, a *answer, failed []string) *answer {
 	c := s.Cfg.Routing.Check
 	if !c.Enabled || d == nil || d.Signals == nil || d.Signals.Complexity < c.MinComplexity || a.status != http.StatusOK ||
 		r.Context().Err() != nil { // client gone: nobody to give a better answer to
 		return a
 	}
-	text, ok := assistantText(a.body)
+	text, ok := dl.text(a.body)
 	if !ok {
 		return a
 	}
@@ -315,7 +343,7 @@ func (s *Server) checkAndEscalate(r *http.Request, body map[string]any, req rout
 	a.header.Set("X-Router-Checked", checked)
 	passed, final := pOK >= c.Threshold, a
 	if !passed {
-		if e := s.escalate(r, body, target, id, d, a.model); e != nil {
+		if e := s.escalate(r, dl, body, target, id, d, a.model); e != nil {
 			e.header.Set("X-Router-Checked", checked)
 			e.header.Set("X-Router-Escalated", a.model+"->"+target)
 			s.Router.Tracker.SetSticky(req.StickyKey(), target)
@@ -332,18 +360,18 @@ func (s *Server) checkAndEscalate(r *http.Request, body map[string]any, req rout
 }
 
 // escalate re-sends the request to model, once. It returns nil unless the call succeeded.
-func (s *Server) escalate(r *http.Request, body map[string]any, model, id string, d *router.Decision, from string) *answer {
+func (s *Server) escalate(r *http.Request, dl *dialect, body map[string]any, model, id string, d *router.Decision, from string) *answer {
 	body["model"] = model
 	payload, _ := json.Marshal(body)
 	release := s.Router.Tracker.Acquire(model)
 	defer release()
 	start := time.Now()
-	res, err := s.Upstream(model).Post(r.Context(), "/chat/completions", payload, r.Header)
+	res, err := s.Upstream(model).Post(r.Context(), dl.path, payload, r.Header)
 	if err != nil {
 		slog.Warn("escalation failed", "model", model, "err", err)
 		return nil
 	}
-	e := readAnswer(res, model, start)
+	e := readAnswer(res, dl, model, start)
 	s.logChat(id, d, e, nil, false, from)
 	if e.status != http.StatusOK {
 		slog.Warn("escalation failed", "model", model, "status", e.status)
@@ -378,12 +406,30 @@ type usage struct {
 	ReasoningTokens  int
 }
 
+// merge overlays the non-zero fields of n on u: streamed usage can be split over several events
+// (Anthropic: input tokens in message_start, output tokens and cost in message_delta).
+func (u usage) merge(n usage) usage {
+	if n.CostUSD != 0 {
+		u.CostUSD = n.CostUSD
+	}
+	if n.PromptTokens != 0 {
+		u.PromptTokens = n.PromptTokens
+	}
+	if n.CompletionTokens != 0 {
+		u.CompletionTokens = n.CompletionTokens
+	}
+	if n.ReasoningTokens != 0 {
+		u.ReasoningTokens = n.ReasoningTokens
+	}
+	return u
+}
+
 // copyAndMeter streams the upstream body to the client and extracts usage on the way.
-func copyAndMeter(w http.ResponseWriter, body io.Reader, stream bool) usage {
+func copyAndMeter(w http.ResponseWriter, body io.Reader, stream bool, extract func([]byte) usage) usage {
 	if !stream {
 		b, _ := io.ReadAll(body)
 		w.Write(b)
-		return extractUsage(b)
+		return extract(b)
 	}
 	flusher, _ := w.(http.Flusher)
 	br := bufio.NewReaderSize(body, 64<<10)
@@ -396,9 +442,7 @@ func copyAndMeter(w http.ResponseWriter, body io.Reader, stream bool) usage {
 				flusher.Flush()
 			}
 			if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok && bytes.Contains(data, []byte(`"usage"`)) {
-				if nu := extractUsage(data); nu != (usage{}) {
-					u = nu
-				}
+				u = u.merge(extract(data))
 			}
 		}
 		if err != nil {
@@ -432,7 +476,11 @@ func extractUsage(b []byte) usage {
 	}
 }
 
-func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) models(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("anthropic-version") != "" {
+		anthropicModels(w, s.Cfg)
+		return
+	}
 	data := []map[string]any{{"id": "auto", "object": "model", "owned_by": "router"}}
 	for _, m := range s.Cfg.Models {
 		data = append(data, map[string]any{"id": m.ID, "object": "model", "owned_by": "upstream"})

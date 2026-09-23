@@ -16,6 +16,8 @@ type Request struct {
 	Chars     int
 	Tools     bool
 	Vision    bool
+	// AnthropicAPI is set for Anthropic Messages API requests: only models that serve that API qualify.
+	AnthropicAPI bool
 }
 
 // StickyKey identifies a conversation: same system prompt + same opening message.
