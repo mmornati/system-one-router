@@ -26,6 +26,8 @@ th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}
 .bars{display:flex;flex-direction:column;gap:6px}
 .barrow{display:flex;align-items:center;gap:8px;font-size:12px}
 .barrow .lbl{width:150px;flex:0 0 auto;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.barrow.wrap{align-items:flex-start}
+.barrow.wrap .lbl{width:260px;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.3}
 .barrow .track{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:5px;height:16px;overflow:hidden}
 .barrow .fill{height:100%;background:var(--accent);border-radius:4px 0 0 4px}
 .barrow .n{width:56px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -86,15 +88,21 @@ function kpis(s) {
   return wrap;
 }
 
-function barList(counts, total, fmt) {
+// barList renders a horizontal bar per (name, count) entry, sorted by count descending unless
+// opts.ordered is set (then the object's own key order is kept, e.g. 0..3 for a histogram by
+// level). opts.wrap widens the label column and lets it wrap instead of truncating with an
+// ellipsis, for entries too long to safely fit 150px (e.g. "model-a -> model-b" pairs).
+function barList(counts, total, fmt, opts) {
   fmt = fmt || (n => String(n));
-  const entries = Object.entries(counts||{}).sort((a,b)=>b[1]-a[1]);
+  opts = opts || {};
+  const entries = Object.entries(counts||{});
+  if (!opts.ordered) entries.sort((a,b)=>b[1]-a[1]);
   if (!entries.length) return el('div', {class:'empty'}, ['No data yet.']);
   const max = Math.max(...entries.map(e=>e[1]), 1);
   const wrap = el('div', {class:'bars'});
   for (const [name, n] of entries) {
     const pct = 100 * n / max;
-    wrap.appendChild(el('div', {class:'barrow'}, [
+    wrap.appendChild(el('div', {class: opts.wrap ? 'barrow wrap' : 'barrow'}, [
       el('div', {class:'lbl', title:name}, [name]),
       el('div', {class:'track'}, [el('div', {class:'fill', style:`width:${pct}%`})]),
       el('div', {class:'n'}, [fmt(n, total)]),
@@ -213,7 +221,16 @@ function checksSection(c) {
   if (!c.count) return el('div', {class:'empty'}, ['No check events yet.']);
   const wrap = el('div', {class:'card'});
   wrap.appendChild(el('p', {}, [`${c.count} checks · ${fmtPct(c.pass_rate_pct)} pass rate · ${c.escalations} escalated after check · ${c.errors || 0} check errors · ${fmtUsd(c.cost_usd)} check cost`]));
-  if (c.escalations) wrap.appendChild(barList(c.escalation_pairs, c.escalations));
+  if (c.escalations) {
+    // Pair keys are "vendor/from-model -> vendor/to-model"; the vendor prefix adds no information
+    // here and made the label too long for its column, so strip it and let the row wrap instead.
+    const shortPairs = {};
+    for (const [pair, n] of Object.entries(c.escalation_pairs || {})) {
+      const [from, to] = pair.split(' -> ');
+      shortPairs[short(from) + ' → ' + short(to)] = n;
+    }
+    wrap.appendChild(barList(shortPairs, c.escalations, undefined, {wrap:true}));
+  }
   return wrap;
 }
 
@@ -248,8 +265,8 @@ function render(s) {
   ]));
 
   app.appendChild(el('div', {class:'grid2'}, [
-    el('div', {}, [el('h2', {}, ['Complexity (0–3)']), el('div', {class:'card'}, [barList({0:s.complexity[0],1:s.complexity[1],2:s.complexity[2],3:s.complexity[3]})])]),
-    el('div', {}, [el('h2', {}, ['Risk (0–2)']), el('div', {class:'card'}, [barList({0:s.risk[0],1:s.risk[1],2:s.risk[2]})])]),
+    el('div', {}, [el('h2', {}, ['Complexity (0–3)']), el('div', {class:'card'}, [barList({0:s.complexity[0],1:s.complexity[1],2:s.complexity[2],3:s.complexity[3]}, undefined, undefined, {ordered:true})])]),
+    el('div', {}, [el('h2', {}, ['Risk (0–2)']), el('div', {class:'card'}, [barList({0:s.risk[0],1:s.risk[1],2:s.risk[2]}, undefined, undefined, {ordered:true})])]),
   ]));
 
   app.appendChild(el('h2', {}, ['Shadow agreement']));
