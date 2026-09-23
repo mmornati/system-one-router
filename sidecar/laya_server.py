@@ -26,26 +26,31 @@ PRELOAD = False
 
 # --- Bucketed padding -------------------------------------------------------
 #
-# On MPS, torch recompiles kernels whenever the input tensor shape changes, which makes a call
-# with a never-before-seen sequence length cost 200-350ms instead of the usual 30-70ms (see
-# README "Latency"). laya.agent.Agent.system_one() batches all questions for one call through
+# On MPS, torch pays a one-off kernel-compile tax whenever the input tensor shape changes.
+# laya.agent.Agent.system_one() batches all questions for one call through
 # laya.common.collate_items(), which pads every item to the *exact* max length in that batch -
 # a length that varies with every request. Rounding that length up to a small, fixed set of
 # bucket sizes makes the shape repeat across calls, so MPS only ever compiles a handful of
-# kernels.
+# kernels, at the cost of extra attention compute over the padded positions.
 #
-# This is safe because collate_items() already produces an attention_mask, and the encoder
-# (laya.common.DecisionModel.forward) uses it both for the transformer encoder's own attention
-# and for the extra decision-head layers' src_key_padding_mask - padded positions never
-# contribute to any output. Verified empirically: with vs. without bucket padding, on 12 varied
-# prompts through the English checkpoint on MPS, the maximum absolute difference in any reported
-# probability was 0.0 (bit-identical), and no answer (choice/score/noul) ever differed.
+# This is safe (output-preserving) because collate_items() already produces an attention_mask,
+# and the encoder (laya.common.DecisionModel.forward) uses it both for the transformer encoder's
+# own attention and for the extra decision-head layers' src_key_padding_mask - padded positions
+# never contribute to any output. Verified empirically: with vs. without bucket padding, on 12
+# varied prompts through the English checkpoint on MPS, the maximum absolute difference in any
+# reported probability was 0.0 (bit-identical), and no answer (choice/score/noul) ever differed.
+#
+# Despite being output-preserving, padding defaults to OFF here: measured on this machine (Apple
+# M4, torch 2.14, macOS 26) neither a coarse (64/128/256/512/1024) nor a fine (every 32 up to 512,
+# every 64 to 1024) bucket set beat unpadded steady-state p50 or p95 latency on 40 varied-length
+# prompts - the shape-recompile tax on this stack is smaller than the padding overhead itself. See
+# README "Latency" for the numbers. Pass --pad-buckets explicitly to opt in on a stack where it
+# does help.
 #
 # Implementation: collate_items is imported by name into laya.agent's module namespace
 # (`from .common import (..., collate_items, ...)`), and Python resolves that name from the
 # module's globals at call time - so replacing `laya.agent.collate_items` here is enough to
 # intercept every call from `Agent.system_one`, with no need to fork or patch the laya package.
-DEFAULT_PAD_BUCKETS = [64, 128, 256, 512, 1024]
 _ORIG_COLLATE_ITEMS = _laya_agent.collate_items
 PAD_BUCKETS = []  # set by install_padding(); empty = disabled
 _force_bucket = None  # set only during warmup, to land exactly on one bucket
@@ -181,9 +186,10 @@ if __name__ == "__main__":
     ap.add_argument("--device", default=None, help="cpu | mps | cuda (default: auto)")
     ap.add_argument("--preload", action="store_true", help="load both checkpoints at startup")
     ap.add_argument(
-        "--pad-buckets", default="64,128,256,512,1024",
+        "--pad-buckets", default="none",
         help="comma-separated sequence-length buckets to pad inputs to, so repeated shapes avoid "
-             "MPS recompiles (default: 64,128,256,512,1024); 'none' disables padding",
+             "MPS recompiles (e.g. 64,128,256,512,1024); default 'none' (disabled) - measured no "
+             "steady-state latency gain on torch 2.14 / macOS 26, see README 'Latency'",
     )
     args = ap.parse_args()
     DEVICE = args.device
