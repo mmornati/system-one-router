@@ -41,9 +41,12 @@ Other endpoints: `GET /v1/models`, `GET /stats?days=N` (aggregated stats as JSON
 ## Dashboard
 
 `GET /dashboard` is a single self-contained HTML page (no external JS) that fetches `/stats` and
-renders it: request/spend/savings/escalation/shadow-agreement tiles, a stacked daily cost-per-model
-chart, a per-model table (cost, tokens, latency percentiles, errors), routing-reason and topic/
-complexity/risk bars, and shadow-agreement, check-escalation and feedback sections. A day selector
+renders it: request/spend/savings/shadow-agreement tiles, "escalated after check" (share of checked
+answers re-sent to a stronger model) and "no model cleared the floor" (share of routed requests), a
+stacked daily cost-per-model chart, a per-model table (cost, tokens, latency percentiles, errors),
+routing-reason and topic/complexity/risk bars, and shadow-agreement, check-escalation and feedback
+sections. An escalated request counts once in the request totals, but both calls count in spend and
+in the per-model numbers. A day selector
 (1 / 7 / 30 / all) re-fetches `/stats` with a different `days` value. It reads `data/decisions.jsonl`
 each time it's called, so it always reflects the current log.
 

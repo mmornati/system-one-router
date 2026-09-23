@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -97,8 +98,8 @@ func TestReasons(t *testing.T) {
 	if st.Reasons["cheapest"] != 2 { // r1 chat decision + d1 route_dry
 		t.Errorf("cheapest = %d, want 2 (%v)", st.Reasons["cheapest"], st.Reasons)
 	}
-	if st.Reasons["escalated"] != 1 {
-		t.Errorf("escalated = %d, want 1", st.Reasons["escalated"])
+	if st.Reasons["no model cleared the floor"] != 1 {
+		t.Errorf("no model cleared the floor = %d, want 1", st.Reasons["no model cleared the floor"])
 	}
 	if st.Reasons["no capable model"] != 1 {
 		t.Errorf("no capable model = %d, want 1 (%v)", st.Reasons["no capable model"], st.Reasons)
@@ -241,5 +242,45 @@ func TestEmptyLog(t *testing.T) {
 	}
 	if st.Totals.Requests != 0 || len(st.Daily) != 0 {
 		t.Errorf("expected empty stats, got %+v", st.Totals)
+	}
+}
+
+// An escalated request logs two chat events with the same id: one request, two calls' spend.
+func TestEscalatedRequestCountedOnce(t *testing.T) {
+	events := `
+{"ts":"2026-09-20T10:00:00Z","kind":"chat","data":{"id":"e1","decision":{"id":"e1","model":"cheap/model","reason":"cheapest model above quality floor","decision_provider":"jev","decision_cost_usd":0.0001,"decision_ms":250,"signals":{"primary":"code-gen","complexity":1,"risk":0}},"model":"cheap/model","status":200,"cost_usd":0.001,"prompt_tokens":1000,"completion_tokens":500,"latency_ms":400}}
+{"ts":"2026-09-20T10:00:01Z","kind":"chat","data":{"id":"e1","decision":{"id":"e1","model":"cheap/model","reason":"cheapest model above quality floor","decision_provider":"jev","decision_cost_usd":0.0001,"decision_ms":250,"signals":{"primary":"code-gen","complexity":1,"risk":0}},"model":"mid/model","status":200,"cost_usd":0.002,"prompt_tokens":1000,"completion_tokens":600,"latency_ms":900,"escalated_from":"cheap/model"}}
+{"ts":"2026-09-20T10:00:01Z","kind":"check","data":{"id":"e1","model":"cheap/model","p_ok":0.2,"passed":false,"escalated_to":"mid/model","check_cost_usd":0.00004,"check_ms":300,"provider":"jev"}}
+{"ts":"2026-09-20T10:01:00Z","kind":"chat","data":{"id":"e2","decision":{"id":"e2","model":"cheap/model","reason":"cheapest model above quality floor","signals":{"primary":"chat","complexity":0,"risk":0}},"model":"cheap/model","status":200,"cost_usd":0.001,"prompt_tokens":10,"completion_tokens":5,"latency_ms":100}}
+{"ts":"2026-09-20T10:01:01Z","kind":"chat","data":{"id":"e2","decision":{"id":"e2","model":"cheap/model","reason":"cheapest model above quality floor","signals":{"primary":"chat","complexity":0,"risk":0}},"model":"mid/model","status":500,"cost_usd":0,"latency_ms":50,"escalated_from":"cheap/model"}}
+{"ts":"2026-09-20T10:01:01Z","kind":"check","data":{"id":"e2","model":"cheap/model","p_ok":0.3,"passed":false,"escalated_to":"","check_cost_usd":0.00004,"check_ms":300,"provider":"jev"}}
+{"ts":"2026-09-20T10:02:00Z","kind":"check","data":{"id":"e3","model":"cheap/model","error":"timeout"}}
+{"ts":"2026-09-20T10:03:00Z","kind":"feedback","data":{"id":"e1","rating":"good"}}
+`
+	st, err := Compute(strings.NewReader(events), testConfig(), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tt := st.Totals
+	if tt.Requests != 2 || tt.Routed != 2 || tt.Errors != 0 || math.Abs(tt.TotalCostUSD-0.004) > 1e-12 || math.Abs(tt.DecisionCostUSD-0.0001) > 1e-12 {
+		t.Errorf("totals = %+v", tt)
+	}
+	if st.Reasons["cheapest"] != 2 || st.Topics["code-gen"] != 1 || st.Complexity[1] != 1 {
+		t.Errorf("decision counted per call: reasons %v topics %v complexity %v", st.Reasons, st.Topics, st.Complexity)
+	}
+	if m := st.Models["mid/model"]; m.Requests != 2 || m.CostUSD != 0.002 || m.CompletionTokens != 600 || m.Errors != 1 {
+		t.Errorf("escalated calls not metered per model: %+v", m)
+	}
+	if st.Daily[0].Models["mid/model"].CostUSD != 0.002 {
+		t.Errorf("daily = %+v", st.Daily)
+	}
+	if math.Abs(st.Savings.ActualCostUSD-0.004) > 1e-12 {
+		t.Errorf("savings actual = %v", st.Savings.ActualCostUSD)
+	}
+	if c := st.Checks; c.Count != 2 || c.Errors != 1 || c.Passed != 0 || c.Escalations != 1 {
+		t.Errorf("checks = %+v", c)
+	}
+	if st.Feedback.PerModel["mid/model"].Good != 1 {
+		t.Errorf("feedback should go to the model that answered: %v", st.Feedback.PerModel)
 	}
 }
