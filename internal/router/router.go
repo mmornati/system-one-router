@@ -4,7 +4,9 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"math/rand/v2"
 	"time"
 
 	"github.com/mmornati/system-one-router/internal/config"
@@ -52,10 +54,11 @@ type Router struct {
 	Tracker *Tracker
 	// OnShadow receives the primary decision and the shadow provider's result (for agreement logging).
 	OnShadow func(primary *Decision, shadow *Signals, shadowProvider string, err error)
+	rand     func() float64 // exploration draw in [0,1); replaced in tests
 }
 
 func New(cfg *config.Config, sel *decision.Selector) *Router {
-	return &Router{cfg: cfg, sel: sel, Tracker: NewTracker(cfg.Routing.StickyTTL)}
+	return &Router{cfg: cfg, sel: sel, Tracker: NewTracker(cfg.Routing.StickyTTL), rand: rand.Float64}
 }
 
 func (r *Router) questions() map[string]decision.Question {
@@ -143,6 +146,10 @@ func (r *Router) Route(ctx context.Context, req Request, id string) *Decision {
 	if d.Reason == "" {
 		d.Reason = "cheapest model above quality floor"
 	}
+	if c := r.explore(sig, best, all); c != nil {
+		d.Model = c.ID
+		d.Reason = fmt.Sprintf("explore: %s (skill %.2f < floor %.2f) instead of %s", c.ID, c.Skill, required, best.ID)
+	}
 	r.Tracker.SetSticky(key, d.Model)
 
 	if s := r.sel.Shadow; s != nil && r.OnShadow != nil && s.Name() != p.Name() {
@@ -158,6 +165,26 @@ func (r *Router) Route(ctx context.Context, req Request, id string) *Decision {
 		}()
 	}
 	return d
+}
+
+// explore returns, with probability routing.explore, the next-cheaper capable model below best that misses
+// the quality floor, for easy (complexity <= 1), harmless (risk 0), non-private requests only. Without it a
+// cheap model only ever sees prompts it is already trusted with, so cmd/refit could never learn it is better
+// than its seed. nil keeps best.
+func (r *Router) explore(sig *Signals, best *Candidate, all []Candidate) *Candidate {
+	if r.cfg.Routing.Explore <= 0 || !best.Eligible || sig.Complexity > 1 || sig.Risk != 0 || sig.Private {
+		return nil
+	}
+	var next *Candidate
+	for i, c := range all {
+		if c.Why == "below quality floor" && c.EffCost < best.EffCost && (next == nil || c.EffCost > next.EffCost) {
+			next = &all[i]
+		}
+	}
+	if next == nil || r.rand() >= r.cfg.Routing.Explore {
+		return nil
+	}
+	return next
 }
 
 func (r *Router) fallback(id string, needs Needs, err error) *Decision {

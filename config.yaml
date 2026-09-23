@@ -34,6 +34,7 @@ routing:
   load_penalty: 0.25                    # +25% effective cost per in-flight request on a model
   sticky_ttl: 2h
   fallback_model: anthropic/claude-sonnet-5
+  explore: 0                            # 0..1: chance to try a cheaper model just below the floor (complexity<=1, risk 0); data for cmd/refit
   retries: 2                            # on 429/5xx, try the next-best models
   reasoning_effort: [low, low, medium, high]   # by complexity, only if the client didn't set one
   check:                 # non-streaming "auto" requests: ask the decision model if the answer is good, escalate if not

@@ -404,6 +404,8 @@ func reasonCategory(reason string) string {
 		return "sticky"
 	case strings.HasPrefix(reason, "escalated"): // routing's own escalation, not check-and-escalate
 		return "no model cleared the floor"
+	case strings.HasPrefix(reason, "explore"):
+		return "explore"
 	case strings.HasPrefix(reason, "fallback"):
 		return "fallback"
 	case strings.Contains(reason, "no capable model") || strings.Contains(reason, "no local model"):
