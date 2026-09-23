@@ -20,7 +20,7 @@ decision:
       api_key_env: OPENROUTER_KEY
       max_state_chars: 6000
       timeout: 3s
-    # laya:                 # local sidecar exposing the same Decisions API shape (not built yet)
+    # laya:                 # local sidecar exposing the same Decisions API shape (sidecar/laya_server.py)
     #   url: http://127.0.0.1:8788/decisions   # sidecar/laya_server.py
     #   model: convaiinnovations/laya
     #   local: true

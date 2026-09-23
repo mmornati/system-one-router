@@ -165,7 +165,7 @@ func runProvider(cfg *config.Config, p decision.Provider, label string, conc int
 	sel := &decision.Selector{Mode: p.Name(), PrivatePolicy: "ignore", Providers: map[string]decision.Provider{p.Name(): p}}
 	rt := router.New(cfg, sel)
 	// warm-up (first call on MPS / cold connection is not representative)
-	rt.Route(context.Background(), router.Request{FirstUser: "warm up", LastUser: "warm up", UserTurns: 1, Chars: 7})
+	rt.Route(context.Background(), router.Request{FirstUser: "warm up", LastUser: "warm up", UserTurns: 1, Chars: 7}, "")
 
 	rows := make([]Row, len(cases))
 	var wg sync.WaitGroup
@@ -177,7 +177,7 @@ func runProvider(cfg *config.Config, p decision.Provider, label string, conc int
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			req := router.Request{FirstUser: c.Prompt, LastUser: c.Prompt, UserTurns: 1, Chars: len(c.Prompt)}
-			d := rt.Route(context.Background(), req)
+			d := rt.Route(context.Background(), req, "")
 			rows[i] = toRow(cfg, c, d, top)
 		}()
 	}

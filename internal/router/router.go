@@ -25,6 +25,8 @@ var riskLevels = []string{
 }
 
 type Decision struct {
+	// ID is the request id assigned by the gateway, carried through to every event logged for this request.
+	ID              string   `json:"id,omitempty"`
 	Model           string   `json:"model"`
 	Reason          string   `json:"reason"`
 	Sticky          bool     `json:"sticky,omitempty"`
@@ -33,11 +35,13 @@ type Decision struct {
 	DecisionMs      int64    `json:"decision_ms,omitempty"`
 	Signals         *Signals `json:"signals,omitempty"`
 	// Answers are the raw decision-model answers (probabilities and per-question confidence).
-	Answers    map[string]decision.Answer `json:"answers,omitempty"`
-	Needs      Needs                      `json:"needs"`
-	Required   float64                    `json:"required_skill,omitempty"`
-	Candidates []Candidate                `json:"candidates,omitempty"`
-	Error      string                     `json:"error,omitempty"`
+	Answers map[string]decision.Answer `json:"answers,omitempty"`
+	// State is the state map sent to the decision model, kept for Laya fine-tuning. Omitted for private requests.
+	State      map[string]string `json:"state,omitempty"`
+	Needs      Needs             `json:"needs"`
+	Required   float64           `json:"required_skill,omitempty"`
+	Candidates []Candidate       `json:"candidates,omitempty"`
+	Error      string            `json:"error,omitempty"`
 	// Refused is set when the request must not be forwarded anywhere (private + local_only, no local model).
 	Refused bool `json:"refused,omitempty"`
 }
@@ -89,14 +93,14 @@ func (r *Router) signals(res *decision.Result) *Signals {
 	}
 }
 
-func (r *Router) Route(ctx context.Context, req Request) *Decision {
+func (r *Router) Route(ctx context.Context, req Request, id string) *Decision {
 	needs := Needs{InputTokens: req.EstTokens(), Tools: req.Tools, Vision: req.Vision}
 	env := Env{InFlight: r.Tracker.InFlight, SpentUSD: r.Tracker.Spent}
 	key := req.StickyKey()
 
 	if req.UserTurns > 1 {
 		if m, ok := r.Tracker.Sticky(key); ok {
-			return &Decision{Model: m, Reason: "sticky: continuing conversation", Sticky: true, Needs: needs}
+			return &Decision{ID: id, Model: m, Reason: "sticky: continuing conversation", Sticky: true, Needs: needs}
 		}
 	}
 
@@ -104,27 +108,31 @@ func (r *Router) Route(ctx context.Context, req Request) *Decision {
 	p, err := r.sel.Pick(privateHint)
 	if err != nil {
 		if privateHint && r.cfg.Decision.Private == "local_only" {
-			return r.localOnly(needs, err)
+			return r.localOnly(id, needs, err)
 		}
-		return r.fallback(needs, err)
+		return r.fallback(id, needs, err)
 	}
-	res, err := p.Decide(ctx, req.State(p.MaxStateChars()), r.questions())
+	st := req.State(p.MaxStateChars())
+	res, err := p.Decide(ctx, st, r.questions())
 	if err != nil {
-		return r.fallback(needs, err)
+		return r.fallback(id, needs, err)
 	}
 	sig := r.signals(res)
 	sig.Private = sig.Private || privateHint
 	needs.LocalOnly = sig.Private && r.cfg.Decision.Private == "local_only"
 
 	best, required, all := Score(r.cfg, *sig, needs, env)
-	d := &Decision{Provider: p.Name(), DecisionCostUSD: res.CostUSD, DecisionMs: res.Latency.Milliseconds(),
+	d := &Decision{ID: id, Provider: p.Name(), DecisionCostUSD: res.CostUSD, DecisionMs: res.Latency.Milliseconds(),
 		Signals: sig, Answers: res.Answers, Needs: needs, Required: required, Candidates: all}
+	if !sig.Private {
+		d.State = st
+	}
 	if best == nil {
 		if needs.LocalOnly {
 			d.Reason, d.Refused = "private request and no capable local model", true
 			return d
 		}
-		d2 := r.fallback(needs, nil)
+		d2 := r.fallback(id, needs, nil)
 		d.Model, d.Reason = d2.Model, "no capable model; "+d2.Reason
 		return d
 	}
@@ -150,8 +158,8 @@ func (r *Router) Route(ctx context.Context, req Request) *Decision {
 	return d
 }
 
-func (r *Router) fallback(needs Needs, err error) *Decision {
-	d := &Decision{Model: r.cfg.Routing.FallbackModel, Reason: "fallback", Needs: needs}
+func (r *Router) fallback(id string, needs Needs, err error) *Decision {
+	d := &Decision{ID: id, Model: r.cfg.Routing.FallbackModel, Reason: "fallback", Needs: needs}
 	if err != nil {
 		d.Error = err.Error()
 		d.Reason = "fallback: decision failed"
@@ -179,12 +187,12 @@ func (r *Router) Alternatives(d *Decision) []string {
 }
 
 // localOnly handles private requests that must stay on this machine when no local decision model is available.
-func (r *Router) localOnly(needs Needs, err error) *Decision {
+func (r *Router) localOnly(id string, needs Needs, err error) *Decision {
 	needs.LocalOnly = true
 	for _, m := range r.cfg.Models {
 		if m.Local {
-			return &Decision{Model: m.ID, Reason: "private request: first local model (no local decision provider)", Needs: needs, Error: err.Error()}
+			return &Decision{ID: id, Model: m.ID, Reason: "private request: first local model (no local decision provider)", Needs: needs, Error: err.Error()}
 		}
 	}
-	return &Decision{Reason: "private request and no local model configured", Needs: needs, Error: err.Error(), Refused: true}
+	return &Decision{ID: id, Reason: "private request and no local model configured", Needs: needs, Error: err.Error(), Refused: true}
 }

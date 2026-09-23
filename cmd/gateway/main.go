@@ -60,7 +60,7 @@ func run(cfgPath, envPath string) error {
 
 	rt := router.New(cfg, sel)
 	rt.OnShadow = func(d *router.Decision, sig *router.Signals, provider string, err error) {
-		ev := map[string]any{"provider": provider, "primary": d.Signals}
+		ev := map[string]any{"id": d.ID, "provider": provider, "primary": d.Signals}
 		if err != nil {
 			ev["error"] = err.Error()
 		} else {
