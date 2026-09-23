@@ -5,6 +5,7 @@ test:
 
 build:
 	go build -o bin/gateway ./cmd/gateway
+	go build -o bin/mcp ./cmd/mcp
 
 gateway:
 	go run ./cmd/gateway

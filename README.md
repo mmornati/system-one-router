@@ -101,6 +101,7 @@ Any local service that accepts `POST {model, state, questions}` and returns `{an
 ```
 cmd/gateway       HTTP server
 cmd/bench         decision benchmark (Jev / Laya) → JSON + HTML report
+cmd/mcp           MCP server exposing route / delegate / feedback to agents
 sidecar/          local Laya server (Decisions API shape)
 internal/decision Decisions API client + provider selection (jev / laya / auto)
 internal/router   request summary, privacy pre-check, scoring, sticky/load/budget state
@@ -144,6 +145,48 @@ curl -s localhost:8787/feedback -d '{"id":"<X-Router-Request-Id>","rating":"bad"
 # 204 No Content
 ```
 
+## MCP server
+
+`cmd/mcp` is a thin client that exposes a running gateway to agents (Claude Code and others) over
+[MCP](https://modelcontextprotocol.io), so an agent can route or delegate work without shelling out to `curl`.
+
+Tools:
+
+- `route` — dry-run the decision for a prompt (model, reason, topic, confidence, complexity, risk,
+  private, required skill, top 3 candidates). No model is called.
+- `delegate` — send a self-contained subtask (summary, boilerplate, docs, simple code) to the model
+  the router picks, and get the answer back as text. Cheaper than doing it in the calling agent.
+- `feedback` — rate a `route`/`delegate` result (`good`/`bad`, by its `request_id`) for later skill re-fitting.
+
+It talks to the gateway over HTTP (`-gateway`/`ROUTER_URL`, default `http://127.0.0.1:8787`); start the
+gateway first.
+
+```bash
+go run ./cmd/mcp                 # stdio (default), for launching from an agent
+go run ./cmd/mcp -http :8790      # streamable HTTP instead
+```
+
+Register it with Claude Code:
+
+```bash
+claude mcp add router -- go run ./cmd/mcp
+# or, after `make build`:
+claude mcp add router -- /path/to/bin/mcp
+```
+
+Generic `mcpServers` config (Claude Desktop, other MCP clients):
+
+```json
+{
+  "mcpServers": {
+    "router": {
+      "command": "/path/to/bin/mcp",
+      "env": { "ROUTER_URL": "http://127.0.0.1:8787" }
+    }
+  }
+}
+```
+
 ## License
 
 Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted TypeSafe model used through OpenRouter.
@@ -155,5 +198,5 @@ Apache-2.0. Laya weights are Apache-2.0 (Convai Innovations); Jev is a hosted Ty
 - [x] Laya sidecar (Python, MPS).
 - [ ] Fine-tune Laya on logged Jev decisions (check Jev's terms first); pad inputs to fixed lengths to avoid MPS recompiles.
 - [ ] Anthropic Messages API endpoint, so Claude Code-style clients can use the gateway.
-- [ ] MCP server exposing `route` / `delegate` to agents.
+- [x] MCP server exposing `route` / `delegate` to agents.
 - [ ] Dashboard over `decisions.jsonl` (cost per model, agreement, escalations).
