@@ -44,7 +44,7 @@ PRELOAD = False
 # M4, torch 2.14, macOS 26) neither a coarse (64/128/256/512/1024) nor a fine (every 32 up to 512,
 # every 64 to 1024) bucket set beat unpadded steady-state p50 or p95 latency on 40 varied-length
 # prompts - the shape-recompile tax on this stack is smaller than the padding overhead itself. See
-# README "Latency" for the numbers. Pass --pad-buckets explicitly to opt in on a stack where it
+# docs/laya-sidecar.md "Latency" for the numbers. Pass --pad-buckets explicitly to opt in on a stack where it
 # does help.
 #
 # Implementation: collate_items is imported by name into laya.agent's module namespace
@@ -189,7 +189,7 @@ if __name__ == "__main__":
         "--pad-buckets", default="none",
         help="comma-separated sequence-length buckets to pad inputs to, so repeated shapes avoid "
              "MPS recompiles (e.g. 64,128,256,512,1024); default 'none' (disabled) - measured no "
-             "steady-state latency gain on torch 2.14 / macOS 26, see README 'Latency'",
+             "steady-state latency gain on torch 2.14 / macOS 26, see docs/laya-sidecar.md 'Latency'",
     )
     args = ap.parse_args()
     DEVICE = args.device
