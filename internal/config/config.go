@@ -53,6 +53,9 @@ type DecisionProvider struct {
 	Local         bool          `yaml:"local"`
 	MaxStateChars int           `yaml:"max_state_chars"`
 	Timeout       time.Duration `yaml:"timeout"`
+	// Temperature rescales choice probabilities (p^(1/T), renormalised) to recalibrate a
+	// provider whose confidence is off: < 1 sharpens, > 1 softens. 0 or 1 leaves answers as-is.
+	Temperature float64 `yaml:"temperature"`
 }
 
 type Routing struct {

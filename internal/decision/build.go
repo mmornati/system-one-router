@@ -18,7 +18,9 @@ func FromConfig(c config.Decision) (*Selector, error) {
 				return nil, fmt.Errorf("decision provider %s: env %s is empty", name, p.APIKeyEnv)
 			}
 		}
-		sel.Providers[name] = NewHTTPProvider(name, p.URL, p.Model, key, p.Local, p.MaxStateChars, p.Timeout)
+		hp := NewHTTPProvider(name, p.URL, p.Model, key, p.Local, p.MaxStateChars, p.Timeout)
+		hp.Temperature = p.Temperature
+		sel.Providers[name] = hp
 	}
 	if c.Shadow != "" {
 		s, ok := sel.Providers[c.Shadow]

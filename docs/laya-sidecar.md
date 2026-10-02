@@ -7,15 +7,16 @@
 unchanged. Use it to keep decisions on your machine, for example with `decision.provider: auto` so private requests
 never leave it (see [decision providers](how-it-works.md#decision-providers)).
 
-Models: `laya` (English, 512 tokens), `laya-multilingual` (1024 tokens, 100+ languages), and `laya-auto` (picks one
-by detected language).
+Models: `laya` (English, 512 tokens), `laya-multilingual` (1024 tokens, 100+ languages), `laya-typed-decisions`
+(English, 1024 tokens, fine-tuned on the [typed-decisions](https://huggingface.co/datasets/LocalLLaMA/typed-decisions)
+benchmark), and `laya-auto` (picks English or multilingual by detected language).
 
 ```bash
-uv venv --python 3.12 sidecar/.venv && uv pip install --python sidecar/.venv/bin/python laya==0.3.6
+uv venv --python 3.12 sidecar/.venv && uv pip install --python sidecar/.venv/bin/python laya==0.3.24
 sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps] [--pad-buckets 64,128,256,512,1024|none]
 ```
 
-Or `make laya` (the first run downloads ~3 GB of weights). Then enable the provider in `config.yaml`:
+Or `make laya` (the first run downloads ~5 GB of weights: three checkpoints). Then enable the provider in `config.yaml`:
 
 ```yaml
 decision:
@@ -29,7 +30,10 @@ decision:
 ```
 
 > [!NOTE]
-> `laya` 0.3.6 ships inference only, with no training/fine-tuning API (see [Roadmap](roadmap.md)).
+> Upgrading from 0.3.6 to 0.3.24 (2026-10-02) changed only the runtime: the published weights and calibration files
+> are byte-identical, and the benchmark numbers moved by at most one prompt per group (see
+> [Benchmark](benchmark.md#laya-0324-vs-036)). Upstream now publishes a fine-tuning notebook and
+> `laya.fit_temperatures`, which unblock the "fine-tune on our own labels" item in the [Roadmap](roadmap.md).
 
 ## Input padding (`--pad-buckets`)
 

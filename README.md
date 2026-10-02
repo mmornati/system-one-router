@@ -97,7 +97,7 @@ escalations per model.
 
 | 🎯 Topic accuracy | 🛣️ Same route as human labels | 💰 Model cost vs always-Opus | ⚡ Decision latency | 🪙 Decision cost |
 |:---:|:---:|:---:|:---:|:---:|
-| **87%** | **73%** | **$1.37** vs $2.40 (−43%) | **366 ms** p50 | **$0.04** / 1k requests |
+| **89%** | **72%** | **$1.37** vs $2.40 (−43%) | **268 ms** p50 | **$0.04** / 1k requests |
 
 ## 🚀 Quickstart
 
@@ -141,7 +141,7 @@ More in [Getting started](docs/getting-started.md).
 | ✅ [Check and escalate](docs/check-and-escalate.md) | Answer check and escalation |
 | 📊 [Dashboard & event log](docs/observability.md) | `/dashboard`, `decisions.jsonl` |
 | 🔁 [Re-fitting skills](docs/refit.md) | Learn skills from outcomes |
-| 📏 [Benchmark](docs/benchmark.md) | Jev vs Laya, full results |
+| 📏 [Benchmark](docs/benchmark.md) | Jev vs Laya, Von, Kev: full results |
 | 🦙 [Laya sidecar](docs/laya-sidecar.md) | Local decision model |
 | 🏗️ [Architecture](docs/architecture.md) | Code layout, make targets |
 | 🗺️ [Roadmap](docs/roadmap.md) | Done and next |

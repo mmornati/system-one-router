@@ -4,6 +4,7 @@ POST /decisions  {"model": ..., "state": {...} | "...", "questions": {...}}
              ->  {"model": ..., "answers": {...}, "usage": {"input_tokens": n, "cost": 0}}
 
 model: "laya" (English, 512 tok) | "laya-multilingual" (1024 tok, 100+ langs)
+       | "laya-typed-decisions" (English, 1024 tok, fine-tuned on typed decisions)
        | "laya-auto" (pick by detected language, like laya.Router)
 Weights come from the convaiinnovations/laya Hugging Face repo (safetensors, ~1.6 GB per checkpoint).
 
@@ -19,7 +20,7 @@ import laya
 import laya.agent as _laya_agent
 import torch
 
-CHECKPOINTS = {"laya": None, "laya-multilingual": "multilingual"}
+CHECKPOINTS = {"laya": None, "laya-multilingual": "multilingual", "laya-typed-decisions": "typed-decisions"}
 _agents, _lock = {}, threading.Lock()
 DEVICE = None  # None = auto (cuda > mps > cpu)
 PRELOAD = False
@@ -139,6 +140,8 @@ def resolve(model, state):
         return "laya"
     if model in ("laya-multilingual", "multilingual"):
         return "laya-multilingual"
+    if model in ("laya-typed-decisions", "typed-decisions"):
+        return "laya-typed-decisions"
     raise ValueError(f"unknown model {model!r}")
 
 
@@ -184,7 +187,7 @@ if __name__ == "__main__":
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8788)
     ap.add_argument("--device", default=None, help="cpu | mps | cuda (default: auto)")
-    ap.add_argument("--preload", action="store_true", help="load both checkpoints at startup")
+    ap.add_argument("--preload", action="store_true", help="load all checkpoints at startup")
     ap.add_argument(
         "--pad-buckets", default="none",
         help="comma-separated sequence-length buckets to pad inputs to, so repeated shapes avoid "

@@ -13,7 +13,7 @@
 | ✅ | [Check and escalate](check-and-escalate.md) | Judge the answer, retry once on a stronger model |
 | 📊 | [Dashboard & event log](observability.md) | `/dashboard`, `decisions.jsonl` event kinds |
 | 🔁 | [Re-fitting skills](refit.md) | `cmd/refit`: learn model skills from logged outcomes |
-| 📏 | [Benchmark](benchmark.md) | Jev vs Laya on 80 labelled prompts |
+| 📏 | [Benchmark](benchmark.md) | Jev vs Laya, Von and Kev on 80 labelled prompts |
 | 🦙 | [Laya sidecar](laya-sidecar.md) | Local decision model, input padding, latency |
 | 🏗️ | [Architecture & development](architecture.md) | Code layout, binaries, make targets |
 | 🗺️ | [Roadmap](roadmap.md) | Done and next |
