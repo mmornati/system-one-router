@@ -10,7 +10,7 @@ build:
 gateway:
 	go run ./cmd/gateway
 
-laya: # local Laya sidecar on :8788 (first run downloads ~3 GB of weights)
+laya: # local Laya sidecar on :8788 (first run downloads ~5 GB of weights: three checkpoints)
 	sidecar/.venv/bin/python sidecar/laya_server.py --preload
 
 bench: # decisions only, no chat model is called

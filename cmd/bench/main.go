@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,16 +74,19 @@ func main() {
 	casesPath := flag.String("cases", "bench/cases.json", "labelled cases")
 	providers := flag.String("providers", "jev,laya,laya-multilingual,laya-auto", "comma-separated providers")
 	layaURL := flag.String("laya-url", "http://127.0.0.1:8788/decisions", "Laya sidecar endpoint")
+	vonURL := flag.String("von-url", "http://127.0.0.1:8790/v1/systemone", "Von server endpoint (von serve --noul-decision raw)")
+	kevURL := flag.String("kev-url", "http://127.0.0.1:8791/v1/systemone", "Kev server endpoint (python -m kev.serve)")
 	top := flag.String("top", "anthropic/claude-opus-5.5", "reference 'always use the best model' baseline")
 	outDir := flag.String("out", "bench/results", "output directory")
+	temps := flag.String("temperature", "", "per-provider choice temperature, e.g. kev=0.47,laya-typed-decisions=0.43")
 	flag.Parse()
-	if err := run(*cfgPath, *casesPath, *providers, *layaURL, *top, *outDir); err != nil {
+	if err := run(*cfgPath, *casesPath, *providers, *layaURL, *vonURL, *kevURL, *temps, *top, *outDir); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfgPath, casesPath, providerList, layaURL, top, outDir string) error {
+func run(cfgPath, casesPath, providerList, layaURL, vonURL, kevURL, temps, top, outDir string) error {
 	config.LoadDotEnv(".env")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -103,11 +107,27 @@ func run(cfgPath, casesPath, providerList, layaURL, top, outDir string) error {
 		return err
 	}
 
+	temperature := map[string]float64{}
+	for _, kv := range strings.Split(temps, ",") {
+		if name, v, ok := strings.Cut(kv, "="); ok {
+			t, err := strconv.ParseFloat(v, 64)
+			if err != nil || t <= 0 {
+				return fmt.Errorf("bad -temperature %q", kv)
+			}
+			temperature[strings.TrimSpace(name)] = t
+		}
+	}
+
 	var runs []*ProviderRun
 	for _, name := range strings.Split(providerList, ",") {
-		p, label, conc, err := buildProvider(cfg, strings.TrimSpace(name), layaURL)
+		name = strings.TrimSpace(name)
+		p, label, conc, err := buildProvider(cfg, name, layaURL, vonURL, kevURL)
 		if err != nil {
 			return err
+		}
+		if t, ok := temperature[name]; ok {
+			p.Temperature = t
+			label += fmt.Sprintf(", T=%g", t)
 		}
 		fmt.Fprintf(os.Stderr, "→ %s (%d cases)\n", label, len(cases))
 		runs = append(runs, runProvider(cfg, p, label, conc, cases, top))
@@ -139,7 +159,7 @@ func run(cfgPath, casesPath, providerList, layaURL, top, outDir string) error {
 	return nil
 }
 
-func buildProvider(cfg *config.Config, name, layaURL string) (decision.Provider, string, int, error) {
+func buildProvider(cfg *config.Config, name, layaURL, vonURL, kevURL string) (*decision.HTTPProvider, string, int, error) {
 	switch name {
 	case "jev":
 		pc, ok := cfg.Decision.Providers["jev"]
@@ -155,6 +175,12 @@ func buildProvider(cfg *config.Config, name, layaURL string) (decision.Provider,
 		return decision.NewHTTPProvider(name, layaURL, "laya", "", true, 1500, 30*time.Second), "Laya English (local, 512 tok)", 1, nil
 	case "laya-multilingual":
 		return decision.NewHTTPProvider(name, layaURL, "laya-multilingual", "", true, 3000, 30*time.Second), "Laya multilingual (local, 1024 tok)", 1, nil
+	case "laya-typed-decisions":
+		return decision.NewHTTPProvider(name, layaURL, "laya-typed-decisions", "", true, 3000, 30*time.Second), "Laya typed-decisions (local, 1024 tok)", 1, nil
+	case "von":
+		return decision.NewHTTPProvider(name, vonURL, "von-latest", "", true, 6000, 30*time.Second), "Von 1.3 (local, 8k tok)", 1, nil
+	case "kev":
+		return decision.NewHTTPProvider(name, kevURL, "kev-latest", "", true, 6000, 30*time.Second), "Kev-0.8B (local, MLX)", 1, nil
 	case "laya-auto":
 		return decision.NewHTTPProvider(name, layaURL, "laya-auto", "", true, 1500, 30*time.Second), "Laya auto (language-routed)", 1, nil
 	}

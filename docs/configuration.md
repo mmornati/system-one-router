@@ -25,7 +25,8 @@ chat models.
 | `private` | `prefer_local` | `prefer_local` \| `local_only` \| `ignore` |
 | `confidence_threshold` | `0.8` | Below this, the quality floor is raised one level |
 | `risk_offset` | `-0.3` | Correction applied to the risk answer (bench: Jev scores risk ~+1 high on harmless tasks) |
-| `providers.<name>` | | `url`, `model`, `api_key_env`, `local`, `max_state_chars`, `timeout` |
+| `providers.<name>` | | `url`, `model`, `api_key_env`, `local`, `max_state_chars`, `timeout`, `temperature` |
+| `providers.<name>.temperature` | `0` (off) | Recalibrates topic (choice) confidence: probabilities become p^(1/T), renormalised. < 1 for an under-confident model, > 1 for an over-confident one. Never changes the chosen topic. See [Benchmark → Recalibrating](benchmark.md#recalibrating-confidence) |
 
 ## `routing`: scoring and forwarding
 

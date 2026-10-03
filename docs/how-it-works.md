@@ -60,7 +60,9 @@ Requests naming any other model are passed through unchanged.
 good enough.
 
 Any local service that accepts `POST {model, state, questions}` and returns `{answers, usage}` works unchanged; see
-the [Laya sidecar](laya-sidecar.md). Laya's English checkpoint sees only 512 tokens, so set `max_state_chars` to
+the [Laya sidecar](laya-sidecar.md), and so do the other open "System One" servers that speak TypeSafe's
+`/v1/systemone` shape, such as [Von](https://github.com/wfzyx/von) and [Kev](https://github.com/jaredpalmer/kev)
+(see [Benchmark → Other decision models](benchmark.md#other-decision-models)). Laya's English checkpoint sees only 512 tokens, so set `max_state_chars` to
 about 1500.
 
 ## Exploration

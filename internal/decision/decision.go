@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 )
@@ -62,6 +63,8 @@ type HTTPProvider struct {
 	maxState                 int
 	timeout                  time.Duration
 	client                   *http.Client
+	// Temperature recalibrates choice answers (see config.DecisionProvider.Temperature).
+	Temperature float64
 }
 
 func NewHTTPProvider(name, url, model, apiKey string, local bool, maxState int, timeout time.Duration) *HTTPProvider {
@@ -110,6 +113,32 @@ func (p *HTTPProvider) Decide(ctx context.Context, state map[string]string, qs m
 			return nil, fmt.Errorf("%s: missing answer %q", p.name, k)
 		}
 	}
+	if p.Temperature > 0 && p.Temperature != 1 {
+		for k, a := range out.Answers {
+			if a.Type == "choice" && len(a.Probabilities) > 0 {
+				out.Answers[k] = rescale(a, p.Temperature)
+			}
+		}
+	}
 	return &Result{Provider: p.name, Model: out.Model, Answers: out.Answers, InputTokens: out.Usage.InputTokens,
 		CostUSD: out.Usage.Cost, Latency: time.Since(t0)}, nil
+}
+
+// rescale applies temperature t to a choice answer: p_i^(1/t), renormalised. The top option
+// cannot change; Confidence becomes its new probability.
+func rescale(a Answer, t float64) Answer {
+	probs := make(map[string]float64, len(a.Probabilities))
+	var sum float64
+	for k, v := range a.Probabilities {
+		probs[k] = math.Pow(max(v, 1e-12), 1/t)
+		sum += probs[k]
+	}
+	for k := range probs {
+		probs[k] /= sum
+	}
+	a.Probabilities = probs
+	if a.Choice != "" {
+		a.Confidence = probs[a.Choice]
+	}
+	return a
 }
