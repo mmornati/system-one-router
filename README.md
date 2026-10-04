@@ -141,7 +141,7 @@ More in [Getting started](docs/getting-started.md).
 | ✅ [Check and escalate](docs/check-and-escalate.md) | Answer check and escalation |
 | 📊 [Dashboard & event log](docs/observability.md) | `/dashboard`, `decisions.jsonl` |
 | 🔁 [Re-fitting skills](docs/refit.md) | Learn skills from outcomes |
-| 📏 [Benchmark](docs/benchmark.md) | Jev vs Laya, Von, Kev: full results |
+| 📏 [Benchmark](docs/benchmark.md) | Jev vs Laya, Von, Kev, Clef-flash: full results |
 | 🦙 [Laya sidecar](docs/laya-sidecar.md) | Local decision model |
 | 🏗️ [Architecture](docs/architecture.md) | Code layout, make targets |
 | 🗺️ [Roadmap](docs/roadmap.md) | Done and next |
