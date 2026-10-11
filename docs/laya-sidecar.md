@@ -12,7 +12,7 @@ Models: `laya` (English, 512 tokens), `laya-multilingual` (1024 tokens, 100+ lan
 benchmark), and `laya-auto` (picks English or multilingual by detected language).
 
 ```bash
-uv venv --python 3.12 sidecar/.venv && uv pip install --python sidecar/.venv/bin/python laya==0.3.24
+uv venv --python 3.12 sidecar/.venv && uv pip install --python sidecar/.venv/bin/python laya==0.4.2
 sidecar/.venv/bin/python sidecar/laya_server.py --preload [--device cpu|mps] [--pad-buckets 64,128,256,512,1024|none]
 ```
 
@@ -34,6 +34,10 @@ decision:
 > are byte-identical, and the benchmark numbers moved by at most one prompt per group (see
 > [Benchmark](benchmark.md#laya-0324-vs-036)). Upstream now publishes a fine-tuning notebook and
 > `laya.fit_temperatures`, which unblock the "fine-tune on our own labels" item in the [Roadmap](roadmap.md).
+>
+> 0.4.2 (2026-10-11) gives identical decisions on all 80 bench prompts (see
+> [Benchmark](benchmark.md#laya-042-vs-0324)). Its breaking change, `laya.Router` falling back to the multilingual
+> checkpoint for undetected languages, does not apply: the sidecar's `laya-auto` routes with `laya.detect_language()`.
 
 ## Input padding (`--pad-buckets`)
 

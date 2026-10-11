@@ -16,6 +16,7 @@ bench/results/
 
 # Laya sidecar virtualenv / Python caches / HF cache overrides
 sidecar/.venv/
+sidecar/.venv-vega/
 __pycache__/
 *.pyc
 .cache/
