@@ -1,4 +1,4 @@
-.PHONY: test build gateway laya bench refit site
+.PHONY: test build gateway laya vega bench refit site
 
 test:
 	go vet ./... && go test -race ./...
@@ -12,6 +12,9 @@ gateway:
 
 laya: # local Laya sidecar on :8788 (first run downloads ~5 GB of weights: three checkpoints)
 	sidecar/.venv/bin/python sidecar/laya_server.py --preload
+
+vega: # local VegaML 0.8B sidecar on :8793 (first run downloads the Qwen3.5-0.8B backbone, ~2 GB)
+	sidecar/.venv-vega/bin/python sidecar/vega_server.py
 
 bench: # decisions only, no chat model is called
 	go run ./cmd/bench
