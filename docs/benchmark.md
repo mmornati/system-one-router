@@ -16,8 +16,10 @@ work, multilingual, inputs longer than 512 tokens, tricky/ambiguous, private dat
 sidecar/.venv/bin/python sidecar/laya_server.py --preload &    # local Laya on :8788 (Apple GPU / MPS)
 go run ./cmd/bench                                             # jev,laya,laya-multilingual,laya-auto
 go run ./cmd/bench -providers jev                              # Jev only
+go run ./cmd/bench -providers jev-1.13,jev-1.14                # two Jev versions side by side
 go run ./cmd/bench -providers jev,laya-typed-decisions,von,kev # other open decision models (servers below)
 go run ./cmd/bench -providers jev,kev -temperature kev=0.47    # with a confidence temperature
+go run ./cmd/bench -providers jev,kev-4b                       # Kev-4B (server on :8794)
 go run ./cmd/bench -providers jev,clef-flash                   # Clef-flash (server below)
 go run ./cmd/bench -providers jev,vega                         # VegaML (sidecar below)
 go test -race ./...
@@ -31,6 +33,8 @@ adapter needed):
 uv pip install "von-sdk>=1.3.7" && von serve --host 127.0.0.1 --port 8790 --device mps --noul-decision raw
 git clone https://github.com/jaredpalmer/kev && cd kev && uv sync --extra serve \
   && uv run --extra serve python -m kev.serve --run jaredpalmer/kev-0.8b --host 127.0.0.1 --port 8791
+KEV_TEMPERATURE=1.11 uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b \
+  --host 127.0.0.1 --port 8794   # same checkout; 1.11 = Kev's 2.41 × our fitted 0.46 (see Kev-4B)
 ```
 
 Clef-flash runs from the [`mlx-community/clef-flash-4bit`](https://huggingface.co/mlx-community/clef-flash-4bit)
@@ -103,6 +107,36 @@ Some routed models differ from the 2026-10-02 run (6 to 19 prompts per checkpoin
 identical. That is OpenRouter pricing: DeepSeek V4.1 Flash went from $0.02/$0.60 to $0.30/$1.20 per million tokens,
 so GPT-5.6 Luna now wins those slots, for every provider and for the gold route too.
 
+### Jev 1.14 vs 1.13
+
+2026-11-09, `typesafe/jev-1.14` and `typesafe/jev-1.13` side by side (`-providers jev-1.13,jev-1.14`), same 80
+prompts, two runs to see the run-to-run noise. 1.13 is still available on OpenRouter and stays the pinned default.
+
+| | Jev 1.13 (run 1 / run 2) | Jev 1.14 (run 1 / run 2) |
+|---|---|---|
+| Topic accuracy | 87.5% / 88.8% | 87.5% / 87.5% |
+| Complexity exact / within ±1 | 70% / 71% · 100% | 69% / 69% · 100% |
+| Risk exact | 60% / 60% | **65% / 66%** |
+| Answers with confidence ≥ 0.8 | 86% / 86% (93% right) | 81% / 80% (95–97% right) |
+| Calibration error (ECE) | 0.088 / 0.099 | **0.072 / 0.059** |
+| Route = gold route | 71% / 74% | 71% / 70% |
+| Cheaper / pricier model than gold | 5 / 18 · 3 / 18 | 3 / 20 · 3 / 21 |
+| Est. model cost (gold: $1.18; always Opus: $2.35) | **$1.31 / $1.35** | $1.47 / $1.48 |
+| Decision latency p50 | 221 / 207 ms | 199 / 192 ms |
+
+The two versions agree on the topic for 95–96% of prompts and on the routed model for 84–86%.
+
+- **1.14 is the better classifier:** +5 points on risk and a lower ECE in both runs, with topic and complexity
+  unchanged.
+- **It routes about 10% more expensively.** It is confident less often (80% vs 86% of answers clear the 0.8
+  threshold), and it moves a few prompts from complexity 2 to 3. Lowering the threshold does not close the gap: at
+  0.7 the cost is $1.44 vs $1.32, at 0.6 it is $1.43 vs $1.28, and 1.13 keeps the better gold-route match at each
+  threshold.
+- **The routing differences come from about a dozen prompts per run**, so treat the cost gap as a direction, not a
+  measurement.
+- **We are staying on 1.13 for now.** The new box question type for images does not matter to the router. Re-check
+  1.14 once outcome data from `cmd/refit` can say whether its extra caution pays for itself.
+
 ### Other decision models
 
 Many open "Jev-like" models have appeared since Jev launched. We picked the ones that are Apache-2.0, run on a
@@ -114,7 +148,9 @@ Many open "Jev-like" models have appeared since Jev launched. We picked the ones
 - **[Von 1.3](https://huggingface.co/wfzyx/von)**: 395M ModernBERT-large with an option-marker head, order-invariant
   options, 8k context, English only.
 - **[Kev-0.8B](https://huggingface.co/jaredpalmer/kev-0.8b)**: LoRA plus pointer head on Qwen3.5-0.8B-Base, served
-  through MLX. Kev-4B is the recommended size but needs a 32 GB Mac.
+  through MLX.
+- **[Kev-4B](https://huggingface.co/jaredpalmer/kev-4b)**: the same recipe on Qwen3.5-4B-Base, the recommended
+  size. Served by the Kev repository in bf16 through MLX (8.4 GB of weights). It fits a 16 GB Mac, with swapping.
 - **[Clef-flash](https://huggingface.co/Cloudflare/clef-flash)** (Cloudflare, 2026-10-01): Qwen3.5-9B backbone plus a
   joint schema head, 64k context, vision encoder, Jev-compatible API. Run as the 4-bit MLX conversion (6.2 GB, ~7 GB
   peak). The model card does not say whether Jev outputs were in the training data, so check before relying on it.
@@ -151,6 +187,53 @@ Clef-flash agrees with Jev on the topic 85% of the time and on the routed model 
 Latency is set by the hardware. A router request is about 750 tokens (4 questions, 19 options), and the M4's GPU
 prefills that in about 3.6 s. A 128-token request takes about 0.57 s. The model card's 0.31 s at 1k tokens was
 measured on an M5 Max. Cloudflare's 39 ms median is on Workers AI.
+
+### Kev-4B
+
+2026-11-09, same 80 prompts, M4 16 GB, Kev-4B in bf16 on MLX (Kev repository `2074cc4`), Jev re-run in the same
+session. Kev-0.8B numbers are from 2026-10-02.
+
+| | Jev 1.13 | Kev-0.8B | Kev-4B | Kev-4B, T=0.46 | Kev-4B, `KEV_TEMPERATURE=1.11` |
+|---|---|---|---|---|---|
+| Topic accuracy | **89%** | 81% | 86% | 86% | 86% |
+| Topic: core / multilingual / long / tricky | 95% / 88% / 75% / 43% | | 89% / **100%** / 75% / 43% | same | same |
+| Complexity exact / within ±1 | **70%** / 100% | 42% / 98% | 51% / 99% | same | 55% / 98% |
+| Risk exact | 61% | 49% | 61% | 61% | **74%** |
+| Answers with confidence ≥ 0.8 | 85% (94% right) | 5% | 19% (100% right) | 74% (95% right) | 74% (95% right) |
+| Calibration error (ECE) | **0.067** | 0.349 | 0.280 | 0.080 | 0.084 |
+| Route = gold route | **69%** | 22% (39% with T=0.47) | 39% | 61% | 67.5% |
+| Cheaper / pricier model than gold | 5 / 20 | 4 / 58 | 3 / 46 | 14 / 17 | 11 / 15 |
+| Est. model cost (gold: $1.18) | $1.33 | $1.16 | $1.13 | $0.70 | $0.87 |
+| Decision latency p50 / p90 | **211 / 278 ms** | 371 ms | 2,565 / 12,510 ms | 2,699 / 3,308 ms | 2,979 / 6,386 ms |
+
+Kev-4B agrees with Jev on the topic 90% of the time and on the routed model 45% of the time (no temperature).
+
+- **Topic and risk are close to Jev's.** Kev-4B is 5 points better than Kev-0.8B on topic and 12 points better on
+  risk, ties Jev on risk (61%), and gets every multilingual prompt right. It is the strongest open model here after
+  Clef-flash, at under half its size.
+- **Complexity is still the weak part** (51% vs Jev's 70%). It squeezes answers toward the middle: 17 of the 21
+  trivial prompts come out as complexity 1, and 8 of the 10 expert prompts below 3. Risk is squeezed the same way:
+  15 of the 16 high-risk prompts come out as risk 1.
+- **Its shipped calibration is too cautious for our questions.** Kev applies T = 2.41, fitted on its own development
+  set, and on our prompts only 19% of topic answers clear the threshold (all of them right). The router plays safe and
+  over-provisions 46 prompts. A fitted T = 0.46 (cross-validated: 21% → 74% confident held-out, 94% right) brings ECE
+  to 0.080 and gold-route match from 39% to 61%.
+- **With T = 0.46 it under-provisions instead.** Once the router trusts the topic, the squeezed complexity and risk
+  scores decide the floor, and 14 prompts go to a cheaper model than gold (Jev: 5). That is why its estimated cost
+  ($0.70) is below gold's ($1.18). The reason: our `temperature` only rescales choice answers. Complexity and risk
+  are scores, so they keep Kev's flat T = 2.41 distributions.
+- **Setting the temperature in Kev itself fixes most of that.** `KEV_TEMPERATURE=1.11` (2.41 × 0.46) gives the same
+  topic answers as T = 0.46 and also sharpens the scores. Risk goes from 61% to **74%**, ahead of Jev's 61%: 8 of the
+  16 high-risk prompts are now risk 2 (was 1). Expert prompts read as complexity 3 go from 2 of 10 to 6 of 10.
+  Gold-route match reaches 67.5% (Jev: 69%), with 11 under-provisioned prompts instead of 14. Trivial prompts are
+  still read as complexity 1 (16 of 21), which is most of the remaining gap to Jev on complexity. The 0.46 was fitted
+  on topic answers only, so treat 1.11 as a reasonable value, not a tuned one for the scores.
+- **Latency:** about 2.6–3 s per decision once warm, and the first request after start takes minutes. The 16 GB M4
+  swaps with 8.4 GB of bf16 weights, which accounts for the 6–12.5 s p90. One run with a 60 s client timeout lost four
+  prompts (three of them long) to swap stalls; the bench now gives Kev-4B 180 s. Too slow for the request
+  path on this machine. The 3 GB 4-bit MLX conversion
+  ([`AbstractFramework/kev-4b-mlx-4bit`](https://huggingface.co/AbstractFramework/kev-4b-mlx-4bit), served through
+  AbstractCore's `/v1/decisions`) should avoid the swapping and was not run.
 
 ### VegaML
 
@@ -195,27 +278,30 @@ The router raises the quality floor when topic confidence is below `confidence_t
 but unsure still over-provisions. `providers.<name>.temperature` rescales choice probabilities to fix that. We fit
 T by minimising log-loss on half of the prompts and measured on the other half (20 random 2-fold splits):
 
-| | Kev-0.8B | Laya typed-decisions | Von 1.3 | Clef-flash | VegaML (zero-shot) |
-|---|---|---|---|---|---|
-| Fitted T (cross-validated median) | 0.47 | 0.43 | 2.47 | 0.64 | 0.60 |
-| Confident ≥ 0.8, held-out | 5% → 60% (89% right) | 0% → 33% (92% right) | 75% → 26% (69% right) | 56% → 81% (95% right) | 1% → 16% (93% right) |
-| Route = gold route with that T (full bench) | 22% → 39% | 12% → 25% | 48% → 36% | 52.5% → **64%** | 17.5% → 20% |
-| ECE with that T (full bench, in-sample) | 0.349 → **0.059** | 0.509 → 0.072 | 0.226 → 0.236 | 0.101 → 0.072 | 0.162 → 0.092 |
+| | Kev-0.8B | Kev-4B | Laya typed-decisions | Von 1.3 | Clef-flash | VegaML (zero-shot) |
+|---|---|---|---|---|---|---|
+| Fitted T (cross-validated median) | 0.47 | 0.46 | 0.43 | 2.47 | 0.64 | 0.60 |
+| Confident ≥ 0.8, held-out | 5% → 60% (89% right) | 21% → 74% (94% right) | 0% → 33% (92% right) | 75% → 26% (69% right) | 56% → 81% (95% right) | 1% → 16% (93% right) |
+| Route = gold route with that T (full bench) | 22% → 39% | 39% → 61% | 12% → 25% | 48% → 36% | 52.5% → **64%** | 17.5% → 20% |
+| ECE with that T (full bench, in-sample) | 0.349 → **0.059** | 0.280 → 0.080 | 0.509 → 0.072 | 0.226 → 0.236 | 0.101 → 0.072 | 0.162 → 0.092 |
 
-A temperature fixes calibration for Kev, typed-decisions and Clef-flash but not for Von, whose errors are confident
+A temperature fixes calibration for Kev (both sizes), typed-decisions and Clef-flash but not for Von, whose errors are confident
 ones that no monotone rescaling can separate. With 80 prompts, treat the fitted values as a starting point, not a tuned
 setting.
 
 ## Reading it
 
-- **Jev is still the only provider usable as-is.** It is 7 to 40 points ahead of Laya, Von and Kev on topic
-  accuracy and well ahead on complexity and risk, and it is calibrated. Clef-flash closes the accuracy gap (below)
-  but not the routing or latency gap.
+- **Jev is still the only provider usable as-is.** It is 8 to 40 points ahead of Laya, Von and Kev-0.8B on topic
+  accuracy and well ahead on complexity and risk, and it is calibrated. Clef-flash and Kev-4B close most of the topic
+  and risk gap (below), but not the complexity, routing or latency gap.
 - **Upgrading Laya doesn't change this** (0.3.6 → 0.3.24 → 0.4.2 give identical decisions). It is rarely confident, so the router plays safe and bumps most requests
   to Sonnet/Opus. The routes end up more expensive than Jev's, not cheaper.
 - **Kev-0.8B is the best small open topic classifier** (81%, and 100% on the multilingual group, at 0.8B), and with
   T = 0.47 it is as well calibrated as Jev. Its routes still match gold only 39% of the time, and run cheaper than
   gold (17 under-provisioned), because it gets complexity and risk wrong more often.
+- **Kev-4B is the closest open model to Jev on routing.** Run with `KEV_TEMPERATURE=1.11`, it gets 86% topic, 74%
+  risk (Jev: 61%) and 67.5% gold-route match (Jev: 69%). Complexity is still weaker (55% vs 70%) and it
+  under-provisions 11 prompts (Jev: 5). At ~3 s per decision in bf16 it is too slow on a 16 GB M4.
 - **Clef-flash is the first open model to match Jev on topic** (90% vs 89%) and it beats Jev on risk (76% vs 61%)
   and on the tricky, long and multilingual groups. It is cautious, though: only 56% of answers clear the confidence
   threshold (98% of those are right), so the router plays safe and over-provisions 38 prompts. It never routes to a
@@ -228,7 +314,7 @@ setting.
 - **Von routes closest to gold out of the box** among the smaller models (48%), but it is over-confident and
   under-provisions 15 prompts.
 - **Bottleneck:** for every open model, complexity and risk are now the weak part, not topic. Fine-tuning on our
-  own complexity/risk labels is the next step (see [Roadmap](roadmap.md)). A larger Kev (4B/9B) on a bigger
-  machine is the other.
+  own complexity/risk labels is the next step (see [Roadmap](roadmap.md)). Kev-4B shows that a larger model plus a
+  server-side temperature fixes risk, but not complexity.
 - **Latency:** see [Laya sidecar → Latency](laya-sidecar.md#latency) for the MPS numbers and the input-padding
   experiment.

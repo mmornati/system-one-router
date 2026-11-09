@@ -76,19 +76,20 @@ func main() {
 	layaURL := flag.String("laya-url", "http://127.0.0.1:8788/decisions", "Laya sidecar endpoint")
 	vonURL := flag.String("von-url", "http://127.0.0.1:8790/v1/systemone", "Von server endpoint (von serve --noul-decision raw)")
 	kevURL := flag.String("kev-url", "http://127.0.0.1:8791/v1/systemone", "Kev server endpoint (python -m kev.serve)")
+	kev4bURL := flag.String("kev4b-url", "http://127.0.0.1:8794/v1/systemone", "Kev-4B server endpoint (python -m kev.serve --run jaredpalmer/kev-4b)")
 	clefURL := flag.String("clef-url", "http://127.0.0.1:8792/v1/systemone", "Clef server endpoint (clef_mlx.py serve)")
 	vegaURL := flag.String("vega-url", "http://127.0.0.1:8793/v1/systemone", "VegaML sidecar endpoint (sidecar/vega_server.py)")
 	top := flag.String("top", "anthropic/claude-opus-5.5", "reference 'always use the best model' baseline")
 	outDir := flag.String("out", "bench/results", "output directory")
 	temps := flag.String("temperature", "", "per-provider choice temperature, e.g. kev=0.47,laya-typed-decisions=0.43")
 	flag.Parse()
-	if err := run(*cfgPath, *casesPath, *providers, *layaURL, *vonURL, *kevURL, *clefURL, *vegaURL, *temps, *top, *outDir); err != nil {
+	if err := run(*cfgPath, *casesPath, *providers, *layaURL, *vonURL, *kevURL, *kev4bURL, *clefURL, *vegaURL, *temps, *top, *outDir); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfgPath, casesPath, providerList, layaURL, vonURL, kevURL, clefURL, vegaURL, temps, top, outDir string) error {
+func run(cfgPath, casesPath, providerList, layaURL, vonURL, kevURL, kev4bURL, clefURL, vegaURL, temps, top, outDir string) error {
 	config.LoadDotEnv(".env")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -123,7 +124,7 @@ func run(cfgPath, casesPath, providerList, layaURL, vonURL, kevURL, clefURL, veg
 	var runs []*ProviderRun
 	for _, name := range strings.Split(providerList, ",") {
 		name = strings.TrimSpace(name)
-		p, label, conc, err := buildProvider(cfg, name, layaURL, vonURL, kevURL, clefURL, vegaURL)
+		p, label, conc, err := buildProvider(cfg, name, layaURL, vonURL, kevURL, kev4bURL, clefURL, vegaURL)
 		if err != nil {
 			return err
 		}
@@ -161,9 +162,9 @@ func run(cfgPath, casesPath, providerList, layaURL, vonURL, kevURL, clefURL, veg
 	return nil
 }
 
-func buildProvider(cfg *config.Config, name, layaURL, vonURL, kevURL, clefURL, vegaURL string) (*decision.HTTPProvider, string, int, error) {
+func buildProvider(cfg *config.Config, name, layaURL, vonURL, kevURL, kev4bURL, clefURL, vegaURL string) (*decision.HTTPProvider, string, int, error) {
 	switch name {
-	case "jev":
+	case "jev", "jev-1.13", "jev-1.14":
 		pc, ok := cfg.Decision.Providers["jev"]
 		if !ok {
 			return nil, "", 0, fmt.Errorf("jev not configured")
@@ -172,7 +173,12 @@ func buildProvider(cfg *config.Config, name, layaURL, vonURL, kevURL, clefURL, v
 		if key == "" {
 			return nil, "", 0, fmt.Errorf("%s is empty", pc.APIKeyEnv)
 		}
-		return decision.NewHTTPProvider("jev", pc.URL, pc.Model, key, false, pc.MaxStateChars, 10*time.Second), "Jev 1.13 (OpenRouter)", 4, nil
+		model := pc.Model
+		if v, ok := strings.CutPrefix(name, "jev-"); ok {
+			model = "typesafe/jev-" + v
+		}
+		label := "Jev " + strings.TrimPrefix(model, "typesafe/jev-") + " (OpenRouter)"
+		return decision.NewHTTPProvider(name, pc.URL, model, key, false, pc.MaxStateChars, 10*time.Second), label, 4, nil
 	case "laya":
 		return decision.NewHTTPProvider(name, layaURL, "laya", "", true, 1500, 30*time.Second), "Laya English (local, 512 tok)", 1, nil
 	case "laya-multilingual":
@@ -183,6 +189,8 @@ func buildProvider(cfg *config.Config, name, layaURL, vonURL, kevURL, clefURL, v
 		return decision.NewHTTPProvider(name, vonURL, "von-latest", "", true, 6000, 30*time.Second), "Von 1.3 (local, 8k tok)", 1, nil
 	case "kev":
 		return decision.NewHTTPProvider(name, kevURL, "kev-latest", "", true, 6000, 30*time.Second), "Kev-0.8B (local, MLX)", 1, nil
+	case "kev-4b":
+		return decision.NewHTTPProvider(name, kev4bURL, "kev-latest", "", true, 6000, 180*time.Second), "Kev-4B (local, MLX)", 1, nil
 	case "clef-flash":
 		return decision.NewHTTPProvider(name, clefURL, "clef-flash", "", true, 6000, 30*time.Second), "Clef-flash 9B (local, MLX 4-bit)", 1, nil
 	case "vega":
